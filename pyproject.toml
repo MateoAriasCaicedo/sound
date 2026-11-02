@@ -1,0 +1,37 @@
+[project]
+name = "sound"
+version = "0.1.0"
+requires-python = ">=3.11"
+# yt-dlp sin tope superior: hay que actualizarlo seguido (comando 'actualizar').
+# ytmusicapi tiene tope: ytsearch.py usa partes internas de su parser, que pueden cambiar en 2.x.
+dependencies = [
+    "yt-dlp>=2026.10",
+    "ytmusicapi>=1.12,<2",
+    "mutagen>=1.47,<2",
+    "requests>=2.31",
+    "pillow",
+    # Reproductor de la ventana (Media Foundation). En otros sistemas no se instalan.
+    "winrt-Windows.Foundation; sys_platform == 'win32'",
+    "winrt-Windows.Media.Core; sys_platform == 'win32'",
+    "winrt-Windows.Media.Playback; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# Tras `pip install -e .` quedan los comandos `sound` (CLI) y `sound-ui` (ventana).
+[project.scripts]
+sound = "app.cli:entry"
+
+[project.gui-scripts]
+sound-ui = "app.ui.main:run"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

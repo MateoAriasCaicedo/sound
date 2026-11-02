@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+Music/
+library.db
+library.lock
+library.db-wal
+library.db-shm
+sound.log*
+cache/
+*.egg-info/
+.pytest_cache/
+genres_cache.json
+ui_prefs.json
+ui_session.json
