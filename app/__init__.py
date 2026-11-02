@@ -1,6 +1,6 @@
 """Sound: descarga y reproduce música de YouTube Music en el escritorio."""
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # Debe correr antes de que cualquier submódulo importe yt_dlp: en la app empaquetada una
 # actualización descargada por el usuario vive en su carpeta de datos y gana a la incluida.

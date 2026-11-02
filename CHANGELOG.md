@@ -1,5 +1,12 @@
 # Cambios
 
+## 1.0.1 — 2026-11-02
+
+### Reproducción
+- Si un archivo local dura mucho menos de lo anunciado (descarga incompleta o truncada), la canción
+  se detiene con un aviso y queda marcada en la lista, en vez de saltar en cadena a la siguiente.
+  Queda registrado en `sound.log`.
+
 ## 1.0.0 — 2026-11-02
 
 Primera versión pensada para entregar a usuarios.

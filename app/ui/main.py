@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from ..core import config, duplicates, favorites, health, history, library, loudness, waveform
+from ..core import config, duplicates, favorites, health, history, library, loudness, media, waveform
 from ..core import log as _log
 from ..core.filters import fold
 from . import prefs, session
@@ -1958,6 +1958,31 @@ class App(tk.Tk):
         self._resolve_ahead([vid])
         return False
 
+    def _track_truncated(self, actual_ms: int) -> bool:
+        """¿La canción local que suena dura mucho menos de lo anunciado? Los streams no se juzgan."""
+        if self.stream_t is not None or self.cur_track is None:
+            return False
+        return media.is_truncated(self.cur_track.get("duration"), actual_ms)
+
+    def _stop_damaged(self, actual_ms: int) -> None:
+        """Detiene una canción incompleta en vez de encadenar saltos a la siguiente."""
+        t = self.cur_track or {}
+        vid = t.get("video_id")
+        expected = t.get("duration") or 0
+        local = (t.get("path") or (self.lib_by_id.get(vid) or {}).get("path")) if vid else None
+        log.warning("audio incompleto: %s (%s) dura %s de %s s%s; se detiene para no saltar",
+                    t.get("title"), vid, fmt(actual_ms / 1000), fmt(expected),
+                    f" — {local}" if local else "")
+        self.player.stop()
+        self.transitioning_since = None
+        self.auto_fired = None
+        self.btn_play.configure(text="▶")
+        if vid:
+            self._set_state(vid, "✗")  # la fila queda marcada hasta que se vuelva a descargar
+        self.status.configure(
+            text=f"Archivo incompleto: «{t.get('title', vid)}» "
+                 f"({fmt(actual_ms / 1000)} de {fmt(expected)}). Vuelve a descargarla.")
+
     def _fade_tick(self) -> None:
         """Cada ~40 ms: mueve los fundidos y lanza la mezcla cuando toca (antes del final real)."""
         try:
@@ -1977,6 +2002,9 @@ class App(tk.Tk):
             return
         rem = p.length - pos
         if rem > PREPARE_WINDOW_MS:
+            return
+        if self._track_truncated(p.length):
+            self._stop_damaged(p.length)
             return
         nxt = self._peek_next()
         if nxt is None:
@@ -2027,7 +2055,11 @@ class App(tk.Tk):
                 if self.player.finished():
                     since = self.transitioning_since
                     if since is None or time.monotonic() - since > TRANSITION_TIMEOUT_S:
-                        self.step(1, auto=True)  # fin natural sin mezcla anticipada
+                        actual = self.player.position()
+                        if self._track_truncated(actual):
+                            self._stop_damaged(actual)
+                        else:
+                            self.step(1, auto=True)  # fin natural sin mezcla anticipada
                 elif not self.seeking and self.player.length:
                     pos = self.player.position()
                     t = self.stream_t
