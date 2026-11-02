@@ -91,6 +91,49 @@ def test_downloads_tags_and_registers(ytdl, tmp_path):
     assert (row["video_id"], row["album"], row["year"], row["has_cover"]) == ("id1", "Cosa Nuestra", 1968, 1)
 
 
+def test_without_genre_asks_for_one_and_files_it_under_that_genre(ytdl, tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader.autogenre, "lookup", lambda track: "Salsa")
+
+    path = downloader.download_track(_track(), None, tmp_path)
+
+    assert path == tmp_path / "por-genero" / "Salsa" / "Artista - Titulo.m4a"
+    assert MP4(path).tags["\xa9gen"] == ["Salsa"]
+    assert _rows()[0]["genre"] == "Salsa"
+
+
+def test_without_genre_reuses_the_label_already_in_the_library(ytdl, tmp_path, monkeypatch):
+    library.add_track({"video_id": "old", "title": "Otra", "artist": "X", "genre": "salsa"},
+                      tmp_path / "otra.m4a")
+    monkeypatch.setattr(downloader.autogenre, "lookup", lambda track: "Salsa")
+
+    path = downloader.download_track(_track(), None, tmp_path)
+
+    assert path.parent.name == "salsa"  # no crea una carpeta 'Salsa' aparte
+    assert _rows()[-1]["genre"] == "salsa"
+
+
+def test_without_genre_stays_in_sueltas_when_there_is_no_match(ytdl, tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader.autogenre, "lookup", lambda track: None)
+
+    path = downloader.download_track(_track(), None, tmp_path)
+
+    assert path == tmp_path / "sueltas" / "Artista - Titulo.m4a"
+    assert "\xa9gen" not in MP4(path).tags
+    assert _rows()[0]["genre"] is None
+
+
+def test_a_failing_genre_lookup_does_not_fail_the_download(ytdl, tmp_path, monkeypatch):
+    def broken(track):
+        raise RuntimeError("iTunes caído")
+
+    monkeypatch.setattr(downloader.autogenre, "lookup", broken)
+
+    path = downloader.download_track(_track(), None, tmp_path)
+
+    assert path.exists()
+    assert _rows()[0]["genre"] is None
+
+
 def test_skips_album_lookup_when_already_known(ytdl, tmp_path, monkeypatch):
     def boom(video_id):
         raise AssertionError("no debía consultar")

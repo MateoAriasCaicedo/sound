@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..core import library
+from ..core import errors, library
 from ..core import log as _log
 
 if TYPE_CHECKING:
@@ -31,7 +31,10 @@ class DownloadsController:
     def start_service(self) -> None:
         """Arranca los trabajadores de descarga en un hilo: importar yt-dlp tarda ~0,5 s."""
         try:
+            from ..core import downloader
             from ..core.service import DownloadService
+
+            downloader.configure_cookies(self.app.cookies)
             service = DownloadService(self.on_event)
             service.start()
         except Exception as exc:  # noqa: BLE001 - la ventana sigue funcionando sin descargas
@@ -52,7 +55,10 @@ class DownloadsController:
             return
         if kind == "outdated":
             q.put(("status", "Varias descargas seguidas fallan como si yt-dlp estuviera desactualizado. "
-                             "Cierra la ventana y ejecuta: sound actualizar"))
+                             "Pulsa «Actualizar yt-dlp» en Descargas."))
+            return
+        if kind == "needs_cookies":
+            q.put(("needs_cookies", info.get("error") or errors.COOKIE_HINT))
             return
         if kind in ("paused", "resumed"):  # no traen canción
             q.put(("queue_paused", kind == "paused"))
@@ -67,7 +73,17 @@ class DownloadsController:
         elif kind == "done":
             q.put(("downloaded", vid, track["title"]))
         elif kind == "failed":
-            q.put(("dl_error", vid, f"{track['title']}: {info['error']}", vid in self.quiet))
+            q.put(("dl_error", vid, f"{track['title']}: {errors.friendly(info['error'])}",
+                   vid in self.quiet))
+
+    def configure_cookies(self, browser: str | None) -> None:
+        """Aplica el navegador elegido a las próximas descargas, sin reiniciar."""
+        try:
+            from ..core import downloader
+
+            downloader.configure_cookies(browser)
+        except Exception as exc:  # noqa: BLE001 - si yt-dlp aún no cargó, no pasa nada
+            log.failure(log, "no se pudieron configurar las cookies", exc)
 
     @staticmethod
     def queue_left() -> int:

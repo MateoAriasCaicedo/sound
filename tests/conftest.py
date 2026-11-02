@@ -1,9 +1,22 @@
+import atexit
+import os
+import shutil
 import struct
+import tempfile
 import threading
+from pathlib import Path
 
 import pytest
 
-from app.core import downloader, library, log, ytsearch
+# Antes de importar `app`: los tests nunca deben usar ni migrar los datos reales del usuario.
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="sound-tests-"))
+os.environ["SOUND_DATA_DIR"] = str(_TEST_ROOT / "data")
+os.environ["SOUND_MUSIC_DIR"] = str(_TEST_ROOT / "Music")
+os.environ["SOUND_LOG"] = str(_TEST_ROOT / "sound.log")
+os.environ["SOUND_NO_MIGRATE"] = "1"
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
+
+from app.core import downloader, library, log, ytsearch  # noqa: E402
 
 
 def _box(kind: bytes, payload: bytes = b"") -> bytes:
@@ -43,6 +56,8 @@ def isolated_state(tmp_path, monkeypatch):
     """Ningún test toca la biblioteca real, y cada uno parte sin instancias de yt-dlp heredadas."""
     monkeypatch.setattr(library, "DB_PATH", tmp_path / "test_library.db")
     monkeypatch.setattr(log, "LOG_PATH", tmp_path / "test.log")  # los tests no escriben en el sound.log real
+    log.reset()  # cada test escribe en su propia carpeta, sin heredar el manejador anterior
+    monkeypatch.setattr(downloader, "MUSIC_DIR", tmp_path / "Music")
     monkeypatch.setattr(downloader, "_local", threading.local())
     # El free_bytes real crea Music/ en el proyecto: aquí siempre hay espacio, y cada test lo cambia si lo necesita.
     monkeypatch.setattr(downloader, "free_bytes", lambda *args: 10 * 1024**4)

@@ -43,6 +43,22 @@ POPULAR_IN_COLOMBIA = (
     "Rock en Español", "Hip-hop en Español",
 )
 CURATED = {filters.fold(name): spec for name, spec in COLOMBIAN if spec}
+# Recetas extra del sidebar que no están en COLOMBIAN (solo «Parrandera» por ahora).
+CURATED[filters.fold("Parrandera")] = {"query": "música parrandera"}
+
+# Géneros que se muestran en el sidebar de la ventana (y en `sound generos`).
+SIDEBAR_GENRES = (
+    "Música popular",
+    "Vallenato",
+    "Reggaeton",
+    "Salsa",
+    "Merengue",
+    "Música mexicana",
+    "Bachata",
+    "Parrandera",
+    "Cumbia",
+    "Champeta",
+)
 
 
 def recommended_names(official) -> list[str]:
@@ -51,6 +67,11 @@ def recommended_names(official) -> list[str]:
     head = [name for name, _ in COLOMBIAN] + list(POPULAR_IN_COLOMBIA)
     seen = {norm(name) for name in head}
     return head + [name for name in official if norm(name) not in seen]
+
+
+def sidebar_genres() -> list[str]:
+    """Géneros fijos que se muestran en el sidebar (y en `sound generos`)."""
+    return list(SIDEBAR_GENRES)
 
 
 def _all_playlists() -> list[dict]:
@@ -71,10 +92,14 @@ def _all_playlists() -> list[dict]:
     with ThreadPoolExecutor(5) as pool:
         found = [p for batch in pool.map(fetch, categories.items()) for p in batch]
     unique = list({p["playlist_id"]: p for p in found}.values())
-    GENRE_CACHE.write_text(
-        json.dumps({"saved_at": time.time(), "playlists": unique}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    try:
+        from .atomic import write_text_atomic
+
+        write_text_atomic(GENRE_CACHE,
+                          json.dumps({"saved_at": time.time(), "playlists": unique},
+                                     ensure_ascii=False))
+    except OSError:
+        pass  # sin caché se vuelve a consultar la próxima vez; no es un fallo de la app
     return unique
 
 

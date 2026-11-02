@@ -21,8 +21,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import downloader, health, library
+from . import downloader, errors, health, library
 from . import log as _log
+from .config import MAX_PARALLEL
 
 log = _log.get("service")
 
@@ -80,7 +81,7 @@ class DownloadService:
     ) -> None:
         self._on_event = on_event
         self.persistent = persistent
-        self.workers = workers or downloader.MAX_PARALLEL
+        self.workers = workers or MAX_PARALLEL
         self.pacer = downloader.Pacer()  # compartido: si YouTube limita, frenan todos
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -89,6 +90,7 @@ class DownloadService:
         self._lock = None
         self._low_disk_reported = False
         self._outdated_streak = 0
+        self._cookies_reported = False
         self._streak_lock = threading.Lock()
 
     # ---------- ciclo de vida ----------
@@ -154,6 +156,8 @@ class DownloadService:
 
     def retry_failed(self) -> int:
         """Devuelve las fallidas a la cola y despierta a los trabajadores. Devuelve cuántas eran."""
+        with self._streak_lock:
+            self._cookies_reported = False
         count = library.retry_failed()
         self.wake()
         return count
@@ -276,9 +280,23 @@ class DownloadService:
             log.warning("falló %s - %s (%s) tras %s intentos: %s", track.get("artist"),
                         track.get("title"), video_id, getattr(exc, "attempts", "?"), exc)
             self._track_outdated(exc)
+            self._warn_cookies(exc)
             self._emit("failed", track, error=exc)
             raise
         library.mark(video_id, "done", used)
         self._track_outdated(None)
+        with self._streak_lock:
+            self._cookies_reported = False
         self._emit("done", track, path=path)
         return path
+
+    def _warn_cookies(self, exc: Exception) -> None:
+        """Avisa una sola vez por racha de que YouTube pide una sesión (cookies)."""
+        if not errors.needs_cookies(exc):
+            return
+        with self._streak_lock:
+            first = not self._cookies_reported
+            self._cookies_reported = True
+        if first:
+            log.info("YouTube pidió una sesión: se sugiere configurar cookies")
+            self._emit("needs_cookies", None, error=errors.friendly(exc))

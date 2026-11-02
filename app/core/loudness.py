@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from . import log as _log
+from .atomic import write_text_atomic
 from .config import LOUDNESS_CACHE
 
 log = _log.get("loudness")
@@ -73,8 +74,7 @@ def _cache(path: Path | None) -> dict:
 def _save(cache: dict, path: Path | None) -> None:
     path = Path(path or LOUDNESS_CACHE)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(path, json.dumps(cache, ensure_ascii=False))
     except OSError:
         log.warning("no se pudo guardar la caché de volumen en %s", path, exc_info=True)
 

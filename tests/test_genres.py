@@ -306,3 +306,18 @@ def test_select_tracks_stops_at_n(monkeypatch):
     _, picked = genres.select_tracks("rock", n=7)
 
     assert len(picked) == 7
+
+
+def test_sidebar_genres_are_the_curated_list():
+    assert genres.sidebar_genres() == [
+        "Música popular",
+        "Vallenato",
+        "Reggaeton",
+        "Salsa",
+        "Merengue",
+        "Música mexicana",
+        "Bachata",
+        "Parrandera",
+        "Cumbia",
+        "Champeta",
+    ]

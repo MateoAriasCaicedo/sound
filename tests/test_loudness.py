@@ -1,5 +1,4 @@
 """Ganancia por canción: interpretar ffmpeg, acotar y cachear."""
-from pathlib import Path
 
 from app.core import loudness
 

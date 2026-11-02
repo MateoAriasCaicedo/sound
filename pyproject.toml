@@ -1,15 +1,33 @@
 [project]
 name = "sound"
-version = "0.1.0"
+version = "1.0.0"
+description = "Descarga, organiza y reproduce música de YouTube Music en el escritorio"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Mateo Arias"}]
 requires-python = ">=3.11"
+keywords = ["musica", "youtube", "yt-dlp", "reproductor", "windows"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio :: Players",
+]
 # yt-dlp sin tope superior: hay que actualizarlo seguido (comando 'actualizar').
 # ytmusicapi tiene tope: ytsearch.py usa partes internas de su parser, que pueden cambiar en 2.x.
 dependencies = [
     "yt-dlp>=2026.10",
     "ytmusicapi>=1.12,<2",
     "mutagen>=1.47,<2",
-    "requests>=2.31",
-    "pillow",
+    "requests>=2.31,<3",
+    "pillow>=10,<14",
     # Reproductor de la ventana (Media Foundation). En otros sistemas no se instalan.
     "winrt-Windows.Foundation; sys_platform == 'win32'",
     "winrt-Windows.Media.Core; sys_platform == 'win32'",
@@ -17,7 +35,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.9",
+    "pyinstaller>=6,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/MateoAriasCaicedo/sound"
+Issues = "https://github.com/MateoAriasCaicedo/sound/issues"
 
 # Tras `pip install -e .` quedan los comandos `sound` (CLI) y `sound-ui` (ventana).
 [project.scripts]
@@ -35,3 +61,12 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]

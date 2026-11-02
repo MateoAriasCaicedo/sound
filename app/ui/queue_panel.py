@@ -7,24 +7,20 @@ consola).
 import tkinter as tk
 from tkinter import ttk
 
-from ..core import library
+from ..core import errors, library
 from .page import Page
 from .widgets import PillButton
 
 REFRESH_MS = 1000
 ROW_LIMIT = 300
 STATE_TEXT = {"running": "descargando", "pending": "en cola", "failed": "falló"}
-EDITABLE = ("pending", "failed")  # una canción que ya se está bajando no se puede quitar ni mover
-HINT = ("Selecciona canciones (Ctrl+clic, Mayús+clic o Ctrl+A)  ·  Supr las quita  ·  "
-        "Al frente reintenta las fallidas")
 COLS = (("state", "Estado", 90), ("artist", "Artista", 170), ("title", "Título", 230),
         ("tries", "Intentos", 62), ("detail", "Detalle", 250))
 
 
 class DownloadsPage(Page):
     def __init__(self, app) -> None:
-        super().__init__(app, "Descargas", hint="Ctrl+A selecciona · Supr quita",
-                         status="Cola de descargas")
+        super().__init__(app, "Descargas", status="Cola de descargas")
         self._job = None
         self._pal = None
 
@@ -46,36 +42,47 @@ class DownloadsPage(Page):
         self.tree.configure(yscrollcommand=self.scroll.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.scroll.grid(row=0, column=1, sticky="ns")
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_selection_buttons())
-        self.tree.bind("<Delete>", lambda e: self.remove_selected())
-        self.tree.bind("<Control-a>", self._select_all)
 
-        self.hint = tk.Label(b, anchor="w", text=HINT, font=self.fonts["small"], justify="left")
-        self.hint.grid(row=1, column=0, sticky="ew", pady=(int(8 * self.k), 0))
+        from ..core import downloader
+
+        self.settings = tk.Frame(b)
+        self.settings.grid(row=1, column=0, sticky="ew", pady=(int(12 * self.k), 0))
+        self.cookie_label = tk.Label(self.settings, text="Cookies de YouTube:",
+                                     font=self.fonts["body"])
+        self.cookie_label.pack(side="left")
+        self.cookie_var = tk.StringVar(value=self.app.cookies)
+        self.cookie_box = ttk.Combobox(
+            self.settings, textvariable=self.cookie_var, state="readonly",
+            width=12, values=("", *downloader.COOKIE_BROWSERS), font=self.fonts["body"])
+        self.cookie_box.pack(side="left", padx=(int(8 * self.k), 0))
+        self.cookie_box.bind("<<ComboboxSelected>>",
+                             lambda _e: self.app.set_cookies(self.cookie_var.get()))
+        self.cookie_hint = tk.Label(
+            self.settings,
+            text="  Elige el navegador donde tengas la sesión de YouTube iniciada si aparece "
+                 "«Sign in to confirm you're not a bot».",
+            font=self.fonts["small"], anchor="w")
+        self.cookie_hint.pack(side="left", padx=(int(8 * self.k), 0))
 
         self.buttons = tk.Frame(b)
         self.buttons.grid(row=2, column=0, sticky="ew", pady=(int(14 * self.k), 0))
-        self.buttons.columnconfigure(4, weight=1)
+        self.buttons.columnconfigure(3, weight=1)
         self.btn_pause = PillButton(self.buttons, self.app.anim, self.k, "Pausar",
                                     self.toggle_pause, self.fonts["body"],
                                     variant="primary", min_width=112)
         self.btn_pause.grid(row=0, column=0, sticky="w")
-        self.btn_retry = PillButton(self.buttons, self.app.anim, self.k, "Reintentar fallidas",
+        self.btn_retry = PillButton(self.buttons, self.app.anim, self.k, "Reintentar",
                                     self.retry_failed, self.fonts["body"],
                                     variant="secondary", min_width=170)
         self.btn_retry.grid(row=0, column=1, padx=(int(8 * self.k), 0), sticky="w")
-        self.btn_front = PillButton(self.buttons, self.app.anim, self.k, "Al frente",
-                                    self.prioritize_selected, self.fonts["body"],
-                                    variant="secondary", min_width=104)
-        self.btn_front.grid(row=0, column=2, padx=(int(8 * self.k), 0), sticky="w")
-        self.btn_remove = PillButton(self.buttons, self.app.anim, self.k, "Quitar",
-                                     self.remove_selected, self.fonts["body"],
-                                     variant="danger", min_width=94)
-        self.btn_remove.grid(row=0, column=3, padx=(int(8 * self.k), 0), sticky="w")
+        self.btn_health = PillButton(self.buttons, self.app.anim, self.k, "Diagnóstico",
+                                     self.app.open_health, self.fonts["body"],
+                                     variant="ghost", min_width=118)
+        self.btn_health.grid(row=0, column=2, padx=(int(8 * self.k), 0), sticky="w")
         self.btn_update = PillButton(self.buttons, self.app.anim, self.k, "Actualizar yt-dlp",
                                      self.app.update_components, self.fonts["body"],
                                      variant="ghost", min_width=158)
-        self.btn_update.grid(row=0, column=5, padx=(int(18 * self.k), 0), sticky="e")
+        self.btn_update.grid(row=0, column=4, padx=(int(18 * self.k), 0), sticky="e")
 
         self.restyle()
         self.refresh()
@@ -116,50 +123,26 @@ class DownloadsPage(Page):
         self.app.retry_failed_downloads()
         self.refresh()
 
-    def selected_ids(self, only_editable: bool = True) -> list[str]:
-        """Canciones seleccionadas, en el orden en que aparecen en la lista."""
-        ids = sorted(self.tree.selection(), key=self.tree.index)
-        if only_editable:
-            ids = [i for i in ids if self.tree.item(i, "tags")[0] in EDITABLE]
-        return ids
-
-    def prioritize_selected(self) -> None:
-        ids = self.selected_ids()
-        if ids:
-            self.app.prioritize_downloads(ids)
-            self.refresh()
-
-    def remove_selected(self) -> str:
-        ids = self.selected_ids(only_editable=False)  # las que ya se bajan se informan, no se ocultan
-        if ids:
-            self.app.remove_downloads(ids)
-            self.refresh()
-        return "break"
-
-    def _select_all(self, _e=None) -> str:
-        self.tree.selection_set(self.tree.get_children())
-        return "break"
-
     # ---------- vista ----------
     def _restyle_content(self) -> None:
         pal = self.app.pal
         self._pal = pal
-        for frame in (self.table, self.buttons):
-            frame.configure(bg=pal["bg"])
-        self.hint.configure(bg=pal["bg"], fg=pal["dim"])
+        self.table.configure(bg=pal["bg"])
+        self.buttons.configure(bg=pal["bg"])
+        self.settings.configure(bg=pal["bg"])
+        self.cookie_label.configure(bg=pal["bg"], fg=pal["fg"])
+        self.cookie_hint.configure(bg=pal["bg"], fg=pal["dim"])
         self.tree.tag_configure("running", foreground=pal["accent"])
         self.tree.tag_configure("pending", foreground=pal["fg"])
         self.tree.tag_configure("failed", foreground=pal["danger"])
-        for button in (self.btn_pause, self.btn_retry, self.btn_front, self.btn_remove,
-                       self.btn_update):
+        style = ttk.Style(self)
+        style.configure("Sound.TCombobox", fieldbackground=pal["field"], background=pal["field"],
+                        foreground=pal["fg"], arrowcolor=pal["fg"], bordercolor=pal["line"])
+        self.cookie_box.configure(style="Sound.TCombobox")
+        for button in (self.btn_pause, self.btn_retry, self.btn_health, self.btn_update):
             button.restyle(bg=pal["bg"], fg=pal["fg"], dim=pal["dim"], faint=pal["faint"],
-                           accent=pal["accent"], danger=pal["danger"])
-
-    def _update_selection_buttons(self) -> None:
-        """Al frente y Quitar solo valen para lo que no se está bajando ya."""
-        usable = bool(self.app.service and self.selected_ids())
-        for button in (self.btn_front, self.btn_remove):
-            button.state(["!disabled"] if usable else ["disabled"])
+                           accent=pal["accent"], on_accent=pal["accent_fg"],
+                           danger=pal["danger"])
 
     def refresh(self) -> None:
         if not self.winfo_exists():
@@ -174,8 +157,9 @@ class DownloadsPage(Page):
         selected, top = self.tree.selection(), self.tree.yview()[0]
         self.tree.delete(*self.tree.get_children())
         for row in rows:
-            detail = row["error"] or ("al frente de la cola" if row["status"] == "pending"
-                                      and row["priority"] > 0 else "")
+            detail = (errors.friendly(row["error"]) if row["error"] else
+                      ("al frente de la cola" if row["status"] == "pending"
+                       and row["priority"] > 0 else ""))
             self.tree.insert("", "end", iid=row["video_id"], tags=(row["status"],), values=(
                 STATE_TEXT.get(row["status"], row["status"]), row["artist"], row["title"],
                 row["attempts"] or "", detail[:120]))
@@ -194,8 +178,9 @@ class DownloadsPage(Page):
         if self.app.active_page is self:
             self.app.status.configure(text=text)
 
+        if self.cookie_var.get() != self.app.cookies:
+            self.cookie_var.set(self.app.cookies)
         self.btn_pause.configure(text="Reanudar" if paused else "Pausar")
         self.btn_pause.state(["!disabled"] if service else ["disabled"])
-        self.btn_retry.configure(text=f"Reintentar fallidas ({failed})" if failed else "Reintentar fallidas")
+        self.btn_retry.configure(text=f"Reintentar ({failed})" if failed else "Reintentar")
         self.btn_retry.state(["!disabled"] if failed and service else ["disabled"])
-        self._update_selection_buttons()

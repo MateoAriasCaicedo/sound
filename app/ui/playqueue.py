@@ -78,3 +78,37 @@ class PlayQueue:
         """Cuántas canciones reproducibles quedan por delante (sin internet, solo las locales)."""
         return sum(1 for j in range(self.opos + 1, len(self.order))
                    if self._is_online() or not self._is_remote(self.ctx[self.order[j]]))
+
+    # ---------- edición de la cola ----------
+    def take_up_next(self, index: int) -> dict | None:
+        """Saca una canción de la cola manual (para quitarla o moverla)."""
+        if 0 <= index < len(self.up_next):
+            return self.up_next.pop(index)
+        return None
+
+    def take_upcoming(self, pos: int) -> dict | None:
+        """Saca la canción que está en la posición `pos` de `order`, sin tocar la actual."""
+        if not 0 <= pos < len(self.order) or pos == self.opos:
+            return None
+        ctx_idx = self.order[pos]
+        track = self.ctx[ctx_idx]
+        del self.order[pos]
+        del self.ctx[ctx_idx]
+        # los índices de ctx que quedaban por encima bajan uno
+        self.order = [i - 1 if i > ctx_idx else i for i in self.order]
+        if pos < self.opos:
+            self.opos -= 1
+        return track
+
+    def insert_up_next(self, pos: int, track: dict) -> None:
+        """Devuelve a la cola manual la canción en la posición `pos`."""
+        self.up_next.insert(max(0, min(pos, len(self.up_next))), track)
+
+    def insert_upcoming(self, pos: int, track: dict) -> None:
+        """Devuelve la canción a la lista para que suene en la posición `pos` de `order`."""
+        had_order = bool(self.order)
+        pos = max(self.opos + 1 if had_order else 0, min(pos, len(self.order)))
+        self.ctx.append(track)
+        self.order.insert(pos, len(self.ctx) - 1)
+        if had_order and pos <= self.opos:  # solo si se inserta antes de la actual
+            self.opos += 1

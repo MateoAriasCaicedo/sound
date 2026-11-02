@@ -3,8 +3,11 @@ import threading
 from contextlib import closing
 from pathlib import Path
 
+from . import log as _log
 from .config import DB_PATH
 from .filters import fold
+
+log = _log.get("library")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks (
@@ -34,18 +37,6 @@ CREATE TABLE IF NOT EXISTS reservations (
     path TEXT PRIMARY KEY,  -- nombre de archivo en minúsculas: Windows no distingue mayúsculas
     video_id TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS playlists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS playlist_tracks (
-    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-    video_id TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    added_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (playlist_id, video_id)
-);
 -- «Me gusta»: sin clave foránea a tracks para que el favorito sobreviva si borras y vuelves a
 -- descargar la canción. Las canciones que no estén en la biblioteca no se muestran.
 CREATE TABLE IF NOT EXISTS likes (
@@ -66,6 +57,7 @@ CREATE INDEX IF NOT EXISTS plays_by_time ON plays (played_at);
 """
 
 QUEUE_FIELDS = ("video_id", "title", "artist", "album", "duration", "cover", "genre")
+SCHEMA_VERSION = 2  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
 # Columnas añadidas después de la primera versión: se agregan a bases de datos ya existentes.
 _ADDED_COLUMNS = {
     "tracks": {"year": "INTEGER", "has_cover": "INTEGER"},
@@ -88,28 +80,62 @@ _ready: set[str] = set()  # bases de datos ya preparadas (esquema, migración, W
 _ready_lock = threading.Lock()
 
 
+def _backup(conn: sqlite3.Connection, path: Path, version: int) -> Path | None:
+    """Copia de seguridad antes de migrar una base de datos existente.
+
+    Se usa la API de backup de SQLite (no copiar el archivo a mano): con WAL, una copia
+    ingenua del .db puede perder las últimas transacciones.
+    """
+    target = path.with_name(f"{path.stem}.v{version}.bak.db")
+    if target.exists():
+        return target
+    try:
+        dst = sqlite3.connect(target)
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+    except sqlite3.Error:
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return target
+
+
 def _prepare(conn: sqlite3.Connection, path: Path, existed: bool) -> None:
     """Esquema, migraciones y modo WAL: una sola vez por base de datos y proceso.
 
     WAL deja que la ventana lea mientras los trabajadores escriben (y al revés) sin bloquearse;
-    es una propiedad del archivo, así que basta con activarlo una vez.
+    es una propiedad del archivo, así que basta con activarlo una vez. Antes de migrar se guarda
+    una copia, porque la biblioteca, el historial y los «me gusta» no se pueden reconstruir.
     """
     key = str(path)
     with _ready_lock:
         if key in _ready and existed:  # si borraron el archivo, hay que prepararlo otra vez
             return
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if existed and version < SCHEMA_VERSION:
+            backup = _backup(conn, path, version)
+            if backup is not None:
+                log.info("copia de seguridad de la base de datos: %s", backup)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _migrate(conn)
+        if version < SCHEMA_VERSION:
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.commit()
         _ready.add(key)
 
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
     path = Path(db_path or DB_PATH)  # DB_PATH se lee al llamar, no al importar
+    path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()  # antes de conectar: sqlite3 crea el archivo vacío al abrirlo
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")  # por conexión: borra en cascada los elementos de una lista
+    conn.execute("PRAGMA foreign_keys=ON")  # por conexión: las referencias se respetan siempre
     _prepare(conn, path, existed)
     return conn
 
@@ -122,6 +148,16 @@ def all_tracks(db_path: Path | None = None) -> list[dict]:
             " ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def genre_label(genre: str, db_path: Path | None = None) -> str:
+    """El texto que ya usa la biblioteca para ese género, para no crear 'salsa' y 'Salsa'."""
+    wanted = fold(genre)
+    with closing(connect(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT genre FROM tracks WHERE genre IS NOT NULL AND trim(genre) != ''"
+        ).fetchall()
+    return next((row[0] for row in rows if fold(row[0]) == wanted), genre)
 
 
 def missing_files(db_path: Path | None = None) -> list[dict]:
@@ -414,7 +450,6 @@ def remove_track(video_id: str, db_path: Path | None = None) -> None:
     with closing(connect(db_path)) as conn, conn:
         conn.execute("DELETE FROM tracks WHERE video_id = ?", (video_id,))
         conn.execute("DELETE FROM queue WHERE video_id = ? AND status = 'done'", (video_id,))
-        conn.execute("DELETE FROM playlist_tracks WHERE video_id = ?", (video_id,))
 
 
 def add_track(track: dict, path: Path, db_path: Path | None = None) -> None:

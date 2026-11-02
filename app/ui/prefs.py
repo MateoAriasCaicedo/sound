@@ -1,12 +1,13 @@
-"""Preferencias de la ventana (ui_prefs.json, junto a la base de datos)."""
+"""Preferencias de la ventana (ui_prefs.json, en la carpeta de datos)."""
 import json
 from pathlib import Path
 
 from ..core import log as _log
-from ..core.config import DB_PATH
+from ..core.atomic import write_text_atomic
+from ..core.config import UI_PREFS
 
 log = _log.get("ui.prefs")
-PATH = Path(DB_PATH).with_name("ui_prefs.json")
+PATH = Path(UI_PREFS)
 
 
 def load(path: Path = PATH) -> dict:
@@ -22,6 +23,6 @@ def load(path: Path = PATH) -> dict:
 
 def save(data: dict, path: Path = PATH) -> None:
     try:
-        path.write_text(json.dumps(data), encoding="utf-8")
+        write_text_atomic(path, json.dumps(data, ensure_ascii=False))
     except OSError:
         log.warning("no se pudieron guardar las preferencias en %s", path, exc_info=True)

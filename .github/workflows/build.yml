@@ -1,0 +1,86 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]" -c constraints.txt
+
+      - name: Bundle Node.js
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "packaging\node" | Out-Null
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/latest-v22.x/win-x64/node.exe" `
+            -OutFile "packaging\node\node.exe" -UseBasicParsing
+          if (-not (Test-Path "packaging\node\node.exe")) { throw "No se descargó Node.js" }
+
+      - name: Build executable
+        run: |
+          python packaging\make_icon.py
+          python -m PyInstaller --noconfirm --clean sound.spec
+
+      - name: Self-test the executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\Sound\Sound.exe")) { throw "No se generó Sound.exe" }
+          $env:SOUND_NO_MIGRATE = "1"
+          $env:SOUND_DATA_DIR = "$env:RUNNER_TEMP\SoundSelfTest"
+          $p = Start-Process "dist\Sound\Sound.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Sound.exe --self-test salió con $($p.ExitCode)" }
+          $log = Join-Path $env:SOUND_DATA_DIR "sound.log"
+          if (-not (Test-Path $log)) { throw "El autotest no creó $log" }
+          Get-Content $log
+
+      - name: Zip portable build
+        shell: pwsh
+        run: Compress-Archive -Path "dist\Sound\*" -DestinationPath "dist\Sound-windows.zip"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path "app\__init__.py" -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
+          $iscc = @(
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "No se encontró ISCC.exe" }
+          & $iscc "/DMyAppVersion=$version" "installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC falló con $LASTEXITCODE" }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sound-windows-${{ github.sha }}
+          path: |
+            dist/Sound-windows.zip
+            dist/Sound-*-setup.exe
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Sound-*-setup.exe
+            dist/Sound-windows.zip
+          generate_release_notes: true

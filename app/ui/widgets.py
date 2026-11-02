@@ -11,12 +11,12 @@ import tkinter as tk
 import tkinter.font as tkfont
 from functools import lru_cache
 
-from PIL import Image, ImageDraw, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageTk
 
 from ..core.waveform import resample
 from .anim import Animator, ease_in_out, ease_out
 from .icons import icon_mask
-from .theme import _rgb, blend, seed_color, text_on
+from .theme import _rgb, blend, seed_color
 
 SS = 4
 MAX_BARS = 240
@@ -86,6 +86,25 @@ def _rounded_mask(w: int, h: int, r: int) -> Image.Image:
     m = Image.new("L", (w * SS, h * SS), 0)
     ImageDraw.Draw(m).rounded_rectangle((0, 0, w * SS - 1, h * SS - 1), radius=r * SS, fill=255)
     return m.resize((w, h), Image.LANCZOS)
+
+
+@lru_cache(maxsize=64)
+def _soft_mask(w: int, h: int, r: int, blur: int) -> Image.Image:
+    """Silueta redondeada desenfocada para sombras y halos.
+
+    Se dibuja sin sobremuestreo: el desenfoque ya suaviza el borde y sale más barato en cada
+    fotograma de las animaciones.
+    """
+    pad = max(1, blur * 2)
+    m = Image.new("L", (w + 2 * pad, h + 2 * pad), 0)
+    ImageDraw.Draw(m).rounded_rectangle((pad, pad, pad + w - 1, pad + h - 1), radius=r, fill=255)
+    return m.filter(ImageFilter.GaussianBlur(blur))
+
+
+def _tinted(mask: Image.Image, color: str, alpha: float) -> Image.Image:
+    img = _layer(mask, color)
+    img.putalpha(mask.point(lambda v: round(v * alpha)))
+    return img
 
 
 class _Painted:
@@ -159,7 +178,7 @@ class IconButton(tk.Canvas):
         self.anim, self.k, self.command = anim, k, command
         self.h = self.press = 0.0
         self.on = self.active = self.focused = False
-        self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", accent="#ff6a4d")
+        self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", accent="#ffffff")
         self._disc = self._make_disc()
         self._mask = icon_mask(icon, self.g)
         self._painted = _Painted(self, self.d // 2, self.d // 2, "center")
@@ -271,7 +290,7 @@ class PlayButton(tk.Canvas):
         self.anim, self.k, self.command, self.busy = anim, k, command, busy
         self.morph = self.h = self.press = 0.0
         self.playing = self._spinning = False
-        self.c = dict(bg="#000000", accent="#ff6a4d", on_accent="#000000")
+        self.c = dict(bg="#000000", accent="#ffffff", on_accent="#000000")
         self._painted = _Painted(self, self.d // 2, self.d // 2, "center")
         self.bind("<Enter>", lambda e: self._animate("h", 1.0, 120))
         self.bind("<Leave>", lambda e: self._animate("h", 0.0, 180))
@@ -388,7 +407,7 @@ class PillButton(tk.Canvas):
         self.h = self.press = 0.0
         self.focused = False
         self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", faint="#555555",
-                      accent="#ff6a4d", danger="#ee6a66")
+                      accent="#ffffff", on_accent="#000000", danger="#ee6a66")
         self.pad = int(16 * k)
         self.h_ = int(height * k)
         self.min_w = int(min_width * k)
@@ -466,8 +485,8 @@ class PillButton(tk.Canvas):
             return blend(c["bg"], c["fg"], 0.045), c["dim"]
         if self.variant == "primary":
             base = c["accent"]
-            hover = blend(base, text_on(base), 0.12)
-            text = text_on(base)
+            hover = blend(base, c["on_accent"], 0.12)
+            text = c["on_accent"]
         elif self.variant == "danger":
             base = blend(c["bg"], c["danger"], 0.10)
             hover = blend(c["bg"], c["danger"], 0.17)
@@ -691,40 +710,66 @@ class StatusLine:
 
 
 class SearchBox(tk.Canvas):
-    """Buscador en forma de píldora: al enfocarlo se ensancha y su borde toma el acento."""
+    """Buscador con sombra suave, icono y atajo visible.
+
+    Al enfocarlo se ensancha, el borde toma el acento y aparece un halo; el icono se tiñe. Vacío y
+    sin foco muestra «Ctrl F»; con texto, un botón para borrar.
+    """
 
     def __init__(self, master, anim: Animator, k: float, font, variable: tk.StringVar, hint: str,
-                 rest: int = 300, focused: int = 420) -> None:
-        self.h = int(36 * k)
+                 rest: int = 340, focused: int = 450) -> None:
+        self.fh = int(38 * k)  # alto de la píldora; el resto del lienzo es aire para la sombra
+        self.px = self.py = int(6 * k)
         self.rest, self.wide = int(rest * k), int(focused * k)
         self.w = self.rest
+        self.h = self.fh + 2 * self.py
         super().__init__(master, width=self.w, height=self.h, highlightthickness=0, bd=0,
                          cursor="xterm")
-        self.anim, self.k, self.var = anim, k, variable
-        self.p = 0.0
+        self.anim, self.k, self.var, self.font = anim, k, variable, font
+        self.p = self.hover = 0.0
+        self._focused = False
+        self._clear_hover = False
         self.c = dict(bg="#000000", field="#111111", fg="#ffffff", dim="#888888", faint="#555555",
-                      line="#333333", accent="#ff6a4d")
+                      line="#333333", accent="#ffffff")
         self._pill = _Painted(self)
         self._icon_mask = icon_mask("search", int(16 * k))
-        self._icon = _Painted(self, int(20 * k), self.h // 2, "center")
+        self._icon = _Painted(self, int(21 * k), self.h // 2, "center")
+        # atajo de teclado, como una tecla dibujada a la derecha
+        self._key_font = tkfont.Font(self, family=font.cget("family"), size=8)
+        self._key_w = self._key_font.measure("Ctrl F") + int(10 * k)
+        self._key_h = int(17 * k)
+        self._key_bg = _Painted(self, 0, self.h // 2, "center")
+        self._key_label = self.create_text(0, self.h // 2, text="Ctrl F", font=self._key_font,
+                                           state="hidden")
         self.entry = tk.Entry(self, textvariable=variable, font=font, bd=0, relief="flat",
                               highlightthickness=0)
         self._win = self.create_window(int(36 * k), self.h // 2, anchor="w", window=self.entry,
-                                       height=int(24 * k), width=self.w - int(66 * k))
+                                       height=int(24 * k))
         # dentro del Entry: un control incrustado siempre tapa el texto del Canvas
         self._hint = tk.Label(self.entry, text=hint, font=font, bd=0, padx=0, pady=0, cursor="xterm")
         self._hint.place(x=0, rely=0.5, anchor="w")
         self._hint.bind("<Button-1>", lambda e: self.entry.focus_set())
-        self._x = self.create_text(self.w - int(17 * k), self.h // 2, text="✕",
-                                   font=("Segoe UI Symbol", 8), state="hidden")
-        self.tag_bind(self._x, "<Button-1>", lambda e: self.clear())
-        self.tag_bind(self._x, "<Enter>", lambda e: self.configure(cursor="hand2"))
-        self.tag_bind(self._x, "<Leave>", lambda e: self.configure(cursor="xterm"))
+        # borrar: disco invisible en reposo y resaltado al pasar el ratón
+        self._clear_bg = self.create_oval(0, 0, 0, 0, fill=self.c["field"], outline="",
+                                          tags="clear")
+        self._clear_lines = [self.create_line(0, 0, 0, 0, fill=self.c["dim"],
+                                              width=max(1, round(1.5 * k)), capstyle="round",
+                                              tags="clear") for _ in range(2)]
+        self.tag_bind("clear", "<Button-1>", lambda e: self.clear())
+        self.tag_bind("clear", "<Enter>", lambda e: self._clear_in(True))
+        self.tag_bind("clear", "<Leave>", lambda e: self._clear_in(False))
         self.bind("<Button-1>", lambda e: self.entry.focus_set())
-        self.entry.bind("<FocusIn>", lambda e: self._grow(1.0))
-        self.entry.bind("<FocusOut>", lambda e: self._grow(0.0))
+        self.bind("<Enter>", lambda e: self._hover(1.0))
+        self.bind("<Leave>", lambda e: self._hover(0.0))
+        self.entry.bind("<FocusIn>", lambda e: self._focus(True))
+        self.entry.bind("<FocusOut>", lambda e: self._focus(False))
+        self.entry.bind("<Enter>", lambda e: self._hover(1.0))
+        self.entry.bind("<Leave>", lambda e: self._hover(0.0))
+        self._hint.bind("<Enter>", lambda e: self._hover(1.0))
+        self._hint.bind("<Leave>", lambda e: self._hover(0.0))
         self.entry.bind("<Escape>", lambda e: self.clear())
         variable.trace_add("write", lambda *a: self._sync())
+        self._sync()
 
     def clear(self) -> None:
         self.var.set("")
@@ -736,12 +781,10 @@ class SearchBox(tk.Canvas):
             self._hint.place_forget()
         else:
             self._hint.place(x=0, rely=0.5, anchor="w")
-        self.itemconfigure(self._x, state="normal" if has else "hidden")
-        if has != (self.p > 0.5) or has:
-            self._grow(1.0 if has or self.focus_get() is self.entry else 0.0)
+        self._grow(1.0 if has or self._focused else 0.0)
 
     def _grow(self, to: float) -> None:
-        if to == 0.0 and self.var.get():
+        if to == 0.0 and (self.var.get() or self._focused):
             to = 1.0
         start = self.p
         if start == to:
@@ -754,39 +797,249 @@ class SearchBox(tk.Canvas):
 
         self.anim.tween(("grow", id(self)), 220, step)
 
+    def _hover(self, to: float) -> None:
+        start = self.hover
+        if start == to:
+            return
+
+        def step(q: float) -> None:
+            self.hover = start + (to - start) * q
+            self._render()
+
+        self.anim.tween(("hover", id(self)), 120 if to else 180, step)
+
+    def _focus(self, active: bool) -> None:
+        self._focused = active
+        self._grow(1.0 if active or self.var.get() else 0.0)
+
+    def _clear_in(self, inside: bool) -> None:
+        self._clear_hover = inside
+        self.configure(cursor="hand2" if inside else "xterm")
+        self._render()
+
+    def _paint_keycap(self) -> None:
+        c = self.c
+        w, h = max(2, self._key_w), max(2, self._key_h)
+        r, bw = int(5 * self.k), max(1, round(self.k))
+        outer = _rounded_mask(w, h, r)
+        inner = _rounded_mask(max(1, w - 2 * bw), max(1, h - 2 * bw), max(1, r - bw))
+        img = _layer(outer, c["line"])
+        img.alpha_composite(_layer(inner, blend(c["field"], c["fg"], 0.03)), (bw, bw))
+        self._key_bg.show(img)
+        self.itemconfigure(self._key_label, fill=c["dim"])
+
+    def _layout(self, show_key: bool) -> None:
+        cy = self.h // 2
+        pill_w = self.w - 2 * self.px
+        right = self._key_w + int(20 * self.k) if show_key else int(34 * self.k)
+        self.itemconfigure(self._win, width=max(1, self.w - 2 * self.px - int(36 * self.k) - right))
+        # borrar
+        cx, r = self.px + pill_w - int(20 * self.k), int(10 * self.k)
+        self.coords(self._clear_bg, cx - r, cy - r, cx + r, cy + r)
+        g = int(4 * self.k)
+        self.coords(self._clear_lines[0], cx - g, cy - g, cx + g, cy + g)
+        self.coords(self._clear_lines[1], cx - g, cy + g, cx + g, cy - g)
+        # atajo
+        kx = self.px + pill_w - int(10 * self.k) - self._key_w / 2
+        self.coords(self._key_bg.item, kx, cy)
+        self.coords(self._key_label, kx, cy)
+
     def restyle(self, **colors) -> None:
         """La píldora no cambia con el tinte de la ventana salvo el borde cuando está enfocada."""
         before = dict(self.c)
         self.c.update(colors)
         c = self.c
         self.configure(bg=c["bg"])
-        solid = ("field", "fg", "dim", "line")
+        solid = ("field", "fg", "dim", "faint", "line")
         if any(before[key] != c[key] for key in solid) or self._pill.photo is None:
             self.entry.configure(bg=c["field"], fg=c["fg"], selectforeground=c["fg"],
                                  insertwidth=max(1, int(1.5 * self.k)))
             self._hint.configure(bg=c["field"], fg=c["dim"])
-            self.itemconfigure(self._x, fill=c["dim"])
-            self._icon.show(_layer(self._icon_mask, c["dim"]))
+            self._paint_keycap()
             self._render()
         elif self.p > 0.01 and before["accent"] != c["accent"]:
             self._render()
         self.entry.configure(insertbackground=c["accent"],
-                             selectbackground=blend(c["field"], c["accent"], 0.35))
+                             selectbackground=blend(c["field"], c["accent"], 0.30))
 
     def _render(self) -> None:
-        c, h = self.c, self.h
+        c, k = self.c, self.k
         w = int(self.rest + (self.wide - self.rest) * self.p)
         if w != self.w:
             self.w = w
             self.configure(width=w)
-            self.itemconfigure(self._win, width=w - int(66 * self.k))
-            self.coords(self._x, w - int(17 * self.k), h // 2)
-        bw = max(1, round(self.k))
-        outer = _rounded_mask(w, h, h // 2)
-        inner = _rounded_mask(w - 2 * bw, h - 2 * bw, h // 2 - bw)
-        img = _layer(outer, blend(c["line"], c["accent"], self.p))
-        img.alpha_composite(_layer(inner, c["field"]), (bw, bw))
+        if self._key_bg.photo is None:
+            self._paint_keycap()
+
+        has = bool(self.var.get())
+        show_key = not has and not self._focused
+        for item in (self._key_bg.item, self._key_label):
+            self.itemconfigure(item, state="normal" if show_key else "hidden")
+        for item in (self._clear_bg, *self._clear_lines):
+            self.itemconfigure(item, state="normal" if has else "hidden")
+        self._layout(show_key)
+
+        pill_w, fh, r = w - 2 * self.px, self.fh, self.fh // 2
+        bw = max(1, round(k))
+        img = Image.new("RGBA", (w, self.h), (0, 0, 0, 0))
+        # sombra suave, un par de píxeles por debajo
+        blur = max(1, int(2 * k))
+        shadow = _soft_mask(pill_w, fh, r, blur)
+        pad = blur * 2
+        img.alpha_composite(_tinted(shadow, "#000000", 0.16),
+                            (self.px - pad, self.py - pad + max(1, int(1.5 * k))))
+        # halo del acento al enfocar
+        if self.p > 0.02:
+            gp = max(2, int(3 * k))
+            glow = _soft_mask(pill_w, fh, r, gp)
+            img.alpha_composite(_tinted(glow, c["accent"], 0.18 * self.p),
+                                (self.px - gp * 2, self.py - gp * 2))
+        # cuerpo: borde fino y relleno sólido
+        outer = _rounded_mask(pill_w, fh, r)
+        inner = _rounded_mask(max(1, pill_w - 2 * bw), max(1, fh - 2 * bw), max(1, r - bw))
+        edge = blend(blend(c["line"], c["fg"], 0.16 * self.hover), c["accent"], self.p)
+        body = _layer(outer, edge)
+        body.alpha_composite(_layer(inner, c["field"]), (bw, bw))
+        img.alpha_composite(body, (self.px, self.py))
         self._pill.show(img)
+
+        icon = blend(blend(c["dim"], c["fg"], 0.45 * self.hover), c["accent"], self.p)
+        self._icon.show(_layer(self._icon_mask, icon))
+        self.itemconfigure(self._clear_bg,
+                           fill=blend(c["field"], c["fg"], 0.10 if self._clear_hover else 0.0))
+        xfg = blend(c["dim"], c["fg"], 0.70 if self._clear_hover else 0.10)
+        for line in self._clear_lines:
+            self.itemconfigure(line, fill=xfg)
+
+
+class Field(tk.Canvas):
+    """Campo redondeado con borde fino, pista y acento al enfocar.
+
+    Sustituye a `tk.Entry`/`tk.Spinbox`: no dibuja las flechas nativas y comparte la paleta y la
+    tipografía de la ventana. `get`/`set`, `configure(state=...)` y `.entry` funcionan como en el
+    control de Tk al que sustituye.
+    """
+
+    def __init__(self, master, anim: Animator, k: float, font, variable: tk.StringVar,
+                 hint: str = "", width: int = 120, height: int = 40, align: str = "left",
+                 digits: int | None = None) -> None:
+        self.h = int(height * k)
+        self.w = int(width * k)
+        self.radius = int(10 * k)
+        self.pad = int(12 * k)
+        super().__init__(master, width=self.w, height=self.h, highlightthickness=0, bd=0,
+                         cursor="xterm")
+        self.anim, self.k, self.var, self.font = anim, k, variable, font
+        self.hint, self.align = hint, align
+        self.enabled = True
+        self.p = self.hover = 0.0
+        self.c = dict(bg="#000000", field="#111111", panel="#181818", fg="#ffffff", dim="#888888",
+                      line="#333333", accent="#ffffff")
+        self._painted = _Painted(self)
+        valid = None
+        if digits:
+            valid = (self.register(lambda text: text == ""
+                                   or (text.isdigit() and len(text) <= digits)), "%P")
+        self.entry = tk.Entry(self, textvariable=variable, font=font, bd=0, relief="flat",
+                              highlightthickness=0, justify=align,
+                              validate="key" if valid else "none", validatecommand=valid)
+        self._win = self.create_window(self.pad, self.h // 2, anchor="w", window=self.entry,
+                                       height=int(24 * k), width=self.w - 2 * self.pad)
+        # dentro del Entry: un control incrustado siempre tapa el texto del Canvas
+        self._hint = tk.Label(self.entry, text=hint, font=font, bd=0, padx=0, pady=0,
+                              cursor="xterm")
+        self._hint.bind("<Button-1>", lambda e: self.entry.focus_set())
+        self.bind("<Configure>", self._resized)
+        self.bind("<Enter>", lambda e: self._animate("hover", 1.0, 110))
+        self.bind("<Leave>", lambda e: self._animate("hover", 0.0, 170))
+        self.bind("<Button-1>", lambda e: self.entry.focus_set())
+        self.entry.bind("<FocusIn>", lambda e: self._animate("p", 1.0, 140))
+        self.entry.bind("<FocusOut>", lambda e: self._animate("p", 0.0, 200))
+        self.entry.bind("<Enter>", lambda e: self._animate("hover", 1.0, 110))
+        self.entry.bind("<Leave>", lambda e: self._animate("hover", 0.0, 170))
+        variable.trace_add("write", lambda *a: self._sync())
+        self._sync()
+
+    # ---------- API parecida a tk.Entry ----------
+    def configure(self, cnf=None, **kw):
+        state = kw.pop("state", None)
+        if state is not None:
+            self.set_enabled(state != "disabled")
+        if cnf is not None or kw:
+            return super().configure(cnf, **kw)
+        return None
+
+    config = configure
+
+    def get(self) -> str:
+        return self.var.get()
+
+    def set(self, value) -> None:
+        self.var.set(str(value))
+
+    def focus_set(self) -> None:
+        self.entry.focus_set()
+
+    def set_enabled(self, on: bool) -> None:
+        if on == self.enabled:
+            return
+        self.enabled = on
+        self.entry.configure(state="normal" if on else "disabled",
+                             cursor="xterm" if on else "arrow")
+        self.configure(cursor="xterm" if on else "arrow")
+        self._hint.configure(bg=self.c["field"] if on else self.c["panel"])
+        self._paint()
+
+    # ---------- dibujo ----------
+    def _resized(self, e) -> None:
+        self.itemconfigure(self._win, width=max(1, e.width - 2 * self.pad))
+        self._paint()
+
+    def _sync(self) -> None:
+        if self.var.get():
+            self._hint.place_forget()
+        elif self.align == "center":
+            self._hint.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self._hint.place(x=0, rely=0.5, anchor="w")
+
+    def _animate(self, attr: str, to: float, ms: int) -> None:
+        start = getattr(self, attr)
+        if start == to:
+            return
+
+        def step(q: float) -> None:
+            setattr(self, attr, start + (to - start) * q)
+            self._paint()
+
+        self.anim.tween((attr, id(self)), ms, step)
+
+    def _paint(self) -> None:
+        c = self.c
+        w, h = max(2, self.winfo_width()), self.h
+        r = max(1, min(self.radius, w // 2, h // 2))
+        bw = max(1, round(self.k))
+        edge = blend(blend(c["line"], c["fg"], 0.10 * self.hover), c["accent"], self.p)
+        outer = _rounded_mask(w, h, r)
+        inner = _rounded_mask(max(1, w - 2 * bw), max(1, h - 2 * bw), max(1, r - bw))
+        img = _layer(outer, edge)
+        img.alpha_composite(_layer(inner, c["field"] if self.enabled else c["panel"]), (bw, bw))
+        self._painted.show(img)
+
+    def restyle(self, **colors) -> None:
+        before = dict(self.c)
+        self.c.update(colors)
+        c = self.c
+        self.configure(bg=c["bg"])
+        if any(before[key] != c[key] for key in ("field", "panel", "fg", "dim", "line")) \
+                or self._painted.photo is None:
+            self.entry.configure(bg=c["field"], fg=c["fg"], disabledbackground=c["panel"],
+                                 disabledforeground=c["dim"], selectforeground=c["fg"],
+                                 insertwidth=max(1, int(1.5 * self.k)))
+            self._hint.configure(bg=c["field"] if self.enabled else c["panel"], fg=c["dim"])
+        self.entry.configure(insertbackground=c["accent"],
+                             selectbackground=blend(c["field"], c["accent"], 0.32))
+        self._paint()
 
 
 class Slider(tk.Canvas):
@@ -800,7 +1053,7 @@ class Slider(tk.Canvas):
         self.anim, self.k, self.command, self.to = anim, k, command, to
         self.value = 0.0
         self.h_amt = 0.0
-        self.c = dict(bg="#000000", rest="#333333", accent="#ff6a4d")
+        self.c = dict(bg="#000000", rest="#333333", accent="#ffffff")
         self._painted = _Painted(self)
         self.bind("<Enter>", lambda e: self._hover(1.0))
         self.bind("<Leave>", lambda e: self._hover(0.0))
@@ -913,7 +1166,7 @@ class Equalizer(tk.Canvas):
         self.size = int(16 * k)
         super().__init__(master, width=self.size, height=self.size, highlightthickness=0, bd=0)
         self.anim, self.playing = anim, playing
-        self.color = "#ff6a4d"
+        self.color = "#ffffff"
         self._painted = _Painted(self)
         self.on_paint = None  # para recolocarlo si la fila se movió
         self._last = 0.0
@@ -986,7 +1239,7 @@ class WaveSeek(tk.Canvas):
         self._dirty = True
         self._full = True    # el próximo dibujo recorre todas las barras
         self._window = (0, 0)  # barras movidas en el dibujo anterior
-        self.c = dict(bg="#000000", rest="#333333", ahead="#555555", accent="#ff6a4d", fg="#ffffff")
+        self.c = dict(bg="#000000", rest="#333333", ahead="#555555", accent="#ffffff", fg="#ffffff")
         self._label = self.create_text(0, int(7 * k), text="", font=font, state="hidden")
         self.bind("<Configure>", self._rebuild)
         self.bind("<ButtonPress-1>", self._press)
@@ -1195,10 +1448,12 @@ class RowList(tk.Canvas):
     """
 
     def __init__(self, master, anim: Animator, k: float, fonts: dict, on_select=None,
-                 on_activate=None, multi: bool = True, row: int = 30) -> None:
+                 on_activate=None, multi: bool = True, row: int = 30, on_move=None,
+                 on_context=None) -> None:
         super().__init__(master, highlightthickness=0, bd=0, takefocus=1)
         self.anim, self.k, self.fonts = anim, k, fonts
         self.on_select, self.on_activate, self.multi = on_select, on_activate, multi
+        self.on_move, self.on_context = on_move, on_context
         self.rh, self.hh, self.gap, self.pad = int(row * k), int(24 * k), int(14 * k), int(12 * k)
         self.items: list[dict] = []
         self.pos: list[tuple[int, int]] = []
@@ -1209,11 +1464,16 @@ class RowList(tk.Canvas):
         self.off = 0.0
         self.total = 1
         self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", faint="#555555", sel="#333333",
-                      hover="#222222")
+                      hover="#222222", accent="#ffffff")
         self._pills: dict[tuple, ImageTk.PhotoImage] = {}
         self._sel_items: dict[int, int] = {}
         self._hover_item = None
         self._width = 0
+        self._drag_from: int | None = None  # fila que se está arrastrando
+        self._drag_sec = None                # sección de esa fila (solo se mueve dentro de ella)
+        self._press_y = 0
+        self._dragging = False
+        self._drop_line = None
         self.bind("<Configure>", self._resized)
         self.bind("<ButtonPress-1>", self._press)
         self.bind("<Double-Button-1>", self._double)
@@ -1222,6 +1482,11 @@ class RowList(tk.Canvas):
         self.bind("<MouseWheel>", self._wheel)
         self.bind("<Up>", lambda e: self._key(-1))
         self.bind("<Down>", lambda e: self._key(1))
+        if on_move is not None:
+            self.bind("<B1-Motion>", self._drag_motion)
+            self.bind("<ButtonRelease-1>", self._drag_release)
+        if on_context is not None:
+            self.bind("<Button-3>", self._context)
 
     # ---------- interfaz de Listbox ----------
     def curselection(self) -> tuple[int, ...]:
@@ -1356,6 +1621,10 @@ class RowList(tk.Canvas):
     def _press(self, e) -> None:
         self.focus_set()
         i = self._hit(self.canvasy(e.y))
+        self._press_y = e.y
+        self._drag_from = i if i is not None and self.items[i].get("move") else None
+        self._drag_sec = self.items[i].get("move") if self._drag_from is not None else None
+        self._dragging = False
         if i is None:
             return
         ctrl, shift = bool(e.state & 0x4) and self.multi, bool(e.state & 0x1) and self.multi
@@ -1369,6 +1638,82 @@ class RowList(tk.Canvas):
         else:
             self.sel, self.anchor = {i}, i
         self._selection_changed(prev)
+
+    # ---------- arrastrar para ordenar ----------
+    def _movers(self) -> list[int]:
+        """Filas de la misma sección que la que se arrastra (sin encabezados ni la actual)."""
+        if self._drag_sec is None:
+            return []
+        return [i for i, it in enumerate(self.items) if it.get("move") == self._drag_sec]
+
+    def _move_slot(self, y: float) -> int:
+        """Dónde se soltaría: índice de inserción dentro de la sección que se arrastra."""
+        cy = self.canvasy(y)
+        movers = self._movers()
+        for k, i in enumerate(movers):
+            top, h = self.pos[i]
+            if cy < top + h / 2:
+                return k
+        return len(movers)
+
+    def _drag_motion(self, e) -> None:
+        if self._drag_from is None:
+            return
+        if not self._dragging and abs(e.y - self._press_y) < int(5 * self.k):
+            return
+        self._dragging = True
+        self._show_drop_line(self._move_slot(e.y))
+        if e.y < int(22 * self.k):  # arrastrar cerca del borde desplaza la lista
+            self._scroll_to(self._target() - self.rh)
+        elif e.y > self.winfo_height() - int(22 * self.k):
+            self._scroll_to(self._target() + self.rh)
+
+    def _show_drop_line(self, k: int) -> None:
+        if self._drop_line is not None:
+            self.delete(self._drop_line)
+            self._drop_line = None
+        movers = self._movers()
+        if not movers:
+            return
+        if k < len(movers):
+            y = self.pos[movers[k]][0]
+        else:
+            top, h = self.pos[movers[-1]]
+            y = top + h
+        width = self._width or self.winfo_reqwidth()
+        self._drop_line = self.create_line(
+            self.pad, y, max(self.pad + 1, width - self.pad), y,
+            fill=self.c["accent"], width=max(1, int(2 * self.k)))
+        self.tag_raise(self._drop_line)
+
+    def _drag_release(self, e) -> None:
+        if self._dragging and self._drag_from is not None:
+            src, k = self._drag_from, self._move_slot(e.y)
+            self._end_drag()
+            if self.on_move is not None:
+                self.on_move(src, k)
+        else:
+            self._end_drag()
+
+    def _end_drag(self) -> None:
+        if self._drop_line is not None:
+            self.delete(self._drop_line)
+            self._drop_line = None
+        self._drag_from = None
+        self._drag_sec = None
+        self._dragging = False
+
+    # ---------- menú contextual ----------
+    def _context(self, e) -> str:
+        i = self._hit(self.canvasy(e.y))
+        if i is None:
+            return "break"
+        prev = set(self.sel)
+        self.sel, self.anchor = {i}, i
+        self._selection_changed(prev)
+        if self.on_context is not None:
+            self.on_context(i, e.x_root, e.y_root)
+        return "break"
 
     def _selection_changed(self, prev: set[int]) -> None:
         if self.hovered in self.sel and self._hover_item is not None:

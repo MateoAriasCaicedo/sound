@@ -85,3 +85,37 @@ def test_append_extends_order_and_current_finds_track():
     assert pq.order == [0, 1, 2, 3]
     assert pq.current("v8")["title"] == "T8"
     assert pq.current("nope") is None
+
+
+def test_take_and_insert_up_next():
+    pq = make(2)
+    pq.up_next = [track(9), track(10)]
+    assert pq.take_up_next(0)["video_id"] == "v9"
+    pq.insert_up_next(0, track(8))
+    assert [t["video_id"] for t in pq.up_next] == ["v8", "v10"]
+    assert pq.take_up_next(9) is None
+
+
+def test_take_upcoming_removes_track_and_keeps_current():
+    pq = make(4)
+    pq.opos = 1
+    assert pq.take_upcoming(0)["video_id"] == "v0"
+    assert pq.opos == 0
+    assert [pq.ctx[i]["video_id"] for i in pq.order] == ["v1", "v2", "v3"]
+    assert pq.take_upcoming(0) is None  # la que suena no se puede quitar
+
+
+def test_insert_upcoming_after_current():
+    pq = make(3)
+    pq.opos = 1
+    pq.insert_upcoming(2, track(7))
+    assert pq.opos == 1
+    assert [pq.ctx[i]["video_id"] for i in pq.order] == ["v0", "v1", "v7", "v2"]
+
+
+def test_insert_upcoming_never_lands_before_current():
+    pq = make(3)
+    pq.opos = 1
+    pq.insert_upcoming(0, track(7))
+    assert [pq.ctx[i]["video_id"] for i in pq.order] == ["v0", "v1", "v7", "v2"]
+

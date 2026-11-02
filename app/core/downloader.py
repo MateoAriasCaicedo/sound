@@ -1,4 +1,3 @@
-import os
 import random
 import re
 import shutil
@@ -16,8 +15,9 @@ from mutagen import MutagenError
 from mutagen.mp4 import MP4, MP4Cover
 from ytmusicapi.exceptions import YTMusicError
 
-from . import library, ytsearch
-from .config import MAX_PARALLEL, MUSIC_DIR
+from . import autogenre, errors, library, ytsearch
+from .config import COOKIES_FROM_BROWSER, MUSIC_DIR
+from .config import MAX_PARALLEL as MAX_PARALLEL  # noqa: F401 - API que usa service
 
 # m4a (AAC) nativo de YouTube: no requiere ffmpeg para convertir.
 FORMAT = "140/bestaudio[ext=m4a]"
@@ -31,11 +31,37 @@ _BASE_OPTS = {
     "retries": 5,
     "js_runtimes": {"node": {}},  # YouTube exige un runtime JS para resolver los enlaces
 }
-_COOKIES_BROWSER = os.environ.get("SOUND_COOKIES_FROM_BROWSER", "").strip()
-if _COOKIES_BROWSER:  # p. ej. "firefox" para vídeos con restricción de edad
-    _BASE_OPTS["cookiesfrombrowser"] = (_COOKIES_BROWSER,)
+_COOKIES_LOCK = threading.Lock()
+_cookies_browser = COOKIES_FROM_BROWSER
+_options_generation = 0
 DURATION_SLACK_S = 10  # tolerancia entre la duración anunciada y la del archivo
 DURATION_SLACK_PCT = 0.10
+COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave", "opera", "vivaldi", "chromium")
+
+
+def configure_cookies(browser: str | None) -> None:
+    """Cambia el navegador del que se leen las cookies sin reiniciar la app.
+
+    Cada hilo tiene su propia instancia de yt-dlp: la generación hace que la próxima descarga
+    de cada hilo cree una nueva con las cookies al día.
+    """
+    global _cookies_browser, _options_generation
+    with _COOKIES_LOCK:
+        _cookies_browser = (browser or "").strip()
+        _options_generation += 1
+
+
+def cookies_browser() -> str:
+    with _COOKIES_LOCK:
+        return _cookies_browser
+
+
+def _options() -> dict:
+    opts = dict(_BASE_OPTS)
+    browser = cookies_browser()
+    if browser:  # p. ej. "firefox" para vídeos con restricción de edad o el aviso de bot
+        opts["cookiesfrombrowser"] = (browser,)
+    return opts
 
 
 class IntegrityError(Exception):
@@ -137,14 +163,17 @@ _local = threading.local()
 
 def _get_ydl() -> yt_dlp.YoutubeDL:
     ydl = getattr(_local, "ydl", None)
-    if ydl is None:
+    generation = getattr(_local, "generation", None)
+    if ydl is None or generation != _options_generation:
         def hook(d: dict) -> None:
             callback = getattr(_local, "callback", None)
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             if callback and d["status"] == "downloading" and total:
                 callback(d["downloaded_bytes"] / total)
 
-        ydl = _local.ydl = yt_dlp.YoutubeDL({**_BASE_OPTS, "progress_hooks": [hook]})
+        ydl = yt_dlp.YoutubeDL({**_options(), "progress_hooks": [hook]})
+        _local.ydl = ydl
+        _local.generation = _options_generation
     return ydl
 
 
@@ -166,13 +195,30 @@ def _download_audio(video_id: str, outtmpl: str, on_progress: Callable[[float], 
         _local.callback = None
 
 
+def _move_to_genre(path: Path, track: dict, genre: str, music_dir: Path) -> Path:
+    """Mueve la canción a su carpeta de género. Si no se puede, se queda donde está."""
+    dest = music_dir / "por-genero" / safe_name(genre)
+    dest.mkdir(parents=True, exist_ok=True)
+    target = _target_path(dest, track)
+    try:
+        path.replace(target)
+    except OSError:
+        return path  # el género es un extra: no se pierde la canción por no poder moverla
+    return target
+
+
 def download_track(
     track: dict,
     genre: str | None = None,
-    music_dir: Path = MUSIC_DIR,
+    music_dir: Path | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> Path:
-    """Descarga una canción a Music/por-genero/<genre>/ y la registra. Devuelve la ruta."""
+    """Descarga una canción a Music/por-genero/<genre>/ y la registra. Devuelve la ruta.
+
+    Si llega sin género (p. ej. una importación sin --genero), se pregunta a iTunes al terminar
+    la descarga; si lo encuentra, se etiqueta y se mueve a su carpeta.
+    """
+    music_dir = Path(music_dir or MUSIC_DIR)
     existing = library.get_path(track["video_id"])
     if existing:
         return existing
@@ -185,7 +231,16 @@ def download_track(
             enriching = pool.submit(_enrich, track)  # la consulta de álbum/año corre mientras baja el audio
             _download_audio(track["video_id"], str(final.with_suffix(".%(ext)s")), on_progress)
         track = enriching.result()
+        if not genre:
+            try:
+                genre = autogenre.lookup(track)
+            except Exception:  # noqa: BLE001 - el género es un extra: nunca frena la descarga
+                genre = None
+            if genre:
+                genre = library.genre_label(genre)  # no crear 'Salsa' si ya existe 'salsa'
         has_cover = _finish(final, track, genre)
+        if genre and final.parent != music_dir / "por-genero" / safe_name(genre):
+            final = _move_to_genre(final, track, genre, music_dir)
         library.add_track({**track, "genre": genre, "has_cover": has_cover}, final)
     finally:
         library.release(track["video_id"])  # ya figura en tracks (o falló): la reserva sobra
@@ -196,7 +251,8 @@ MIN_FREE_BYTES = 500 * 1024**2  # por debajo de esto la cola se detiene sin perd
 EST_TRACK_BYTES = 5 * 1024**2  # tamaño medio de una canción, para avisar antes de empezar
 
 
-def free_bytes(path: Path = MUSIC_DIR) -> int:
+def free_bytes(path: Path | None = None) -> int:
+    path = Path(path or MUSIC_DIR)
     path.mkdir(parents=True, exist_ok=True)
     return shutil.disk_usage(path).free
 
@@ -214,16 +270,16 @@ PERMANENT_MARKERS = (
     "private video", "has been removed", "no longer available", "not available in your country",
     "sign in to confirm your age", "copyright", "members-only", "has been terminated",
 )
-# YouTube está limitando el ritmo: conviene que todos los trabajadores frenen.
-THROTTLE_MARKERS = ("http error 403", "http error 429", "too many requests")
 
 
 def is_permanent(exc: Exception) -> bool:
-    return isinstance(exc, WrongDuration) or any(m in str(exc).lower() for m in PERMANENT_MARKERS)
+    # El aviso de bot y la restricción por edad no se arreglan reintentando: hace falta sesión.
+    return (isinstance(exc, WrongDuration) or errors.is_bot_check(exc)
+            or any(m in str(exc).lower() for m in PERMANENT_MARKERS))
 
 
 def is_throttle(exc: Exception) -> bool:
-    return any(m in str(exc).lower() for m in THROTTLE_MARKERS)
+    return any(m in str(exc).lower() for m in errors.THROTTLE_MARKERS)
 
 
 def is_online(host: str = "music.youtube.com", port: int = 443, timeout: float = 3.0) -> bool:

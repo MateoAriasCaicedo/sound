@@ -25,6 +25,8 @@ def test_migration_adds_columns_to_old_database(tmp_path):
         survivor = conn.execute("SELECT title FROM tracks WHERE video_id = 'x'").fetchone()
     assert {"year", "has_cover"} <= columns
     assert survivor["title"] == "T"  # los datos viejos siguen ahí
+    assert (tmp_path / "old.v0.bak.db").exists()  # copia antes de migrar
+    assert (tmp_path / "old.v2.bak.db").exists() is False
 
 
 def test_add_track_stores_year_and_cover_flag():

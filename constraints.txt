@@ -1,0 +1,12 @@
+# Versiones con las que se compiló y probó Sound 1.0.0.
+# Uso: pip install -e ".[dev]" -c constraints.txt
+# yt-dlp se actualiza desde la app; esta fijación es solo para builds reproducibles.
+yt-dlp==2026.10.26
+yt-dlp-ejs==0.8.0
+ytmusicapi==1.12.3
+mutagen==1.48.1
+requests==2.34.2
+pillow==13.0.0
+pytest==9.2.0
+ruff==0.17.3
+pyinstaller==6.22.3

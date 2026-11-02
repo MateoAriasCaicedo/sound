@@ -247,7 +247,7 @@ def select_by_prompt(
     """Reúne hasta n canciones que cumplan la frase. `on_progress(halladas, n, búsquedas, total)`.
 
     `should_stop()` se consulta antes de cada búsqueda: si devuelve True se termina y se entrega lo
-    ya encontrado (así un botón «Cancelar» no pierde el trabajo hecho). `search` y `details` se
+    ya encontrado (no se pierde el trabajo hecho). `search` y `details` se
     pueden sustituir (los tests no usan red). Si NINGUNA búsqueda o consulta de año funcionó, se
     avisa con ConnectionError en vez de devolver una lista vacía.
     """

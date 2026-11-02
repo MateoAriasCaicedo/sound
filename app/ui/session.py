@@ -7,10 +7,11 @@ import json
 from pathlib import Path
 
 from ..core import log as _log
-from ..core.config import DB_PATH
+from ..core.atomic import write_text_atomic
+from ..core.config import UI_SESSION
 
 log = _log.get("ui.session")
-PATH = Path(DB_PATH).with_name("ui_session.json")
+PATH = Path(UI_SESSION)
 MAX_TRACKS = 500  # tope defensivo: una radio o una playlist enorme no debe hinchar el archivo
 TRACK_KEYS = ("video_id", "title", "artist", "album", "genre", "duration", "path", "cover",
               "year", "_genre")
@@ -59,7 +60,7 @@ def save(state: dict, path: Path | None = None) -> None:
     payload["opos"] = min(max(0, payload["opos"]),
                           max(0, len(payload["order"]) - 1))
     try:
-        path.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        write_text_atomic(path, json.dumps(payload, ensure_ascii=False, default=str))
     except OSError:
         log.warning("no se pudo guardar la sesión en %s", path, exc_info=True)
 

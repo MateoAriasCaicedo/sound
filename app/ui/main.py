@@ -6,23 +6,47 @@ import queue
 import threading
 import time
 import tkinter as tk
+import traceback
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
-from ..core import duplicates, favorites, health, history, importer, library, loudness, playlists, waveform
+from ..core import config, duplicates, favorites, health, history, library, loudness, waveform
 from ..core import log as _log
 from ..core.filters import fold
 from . import prefs, session
+from .anim import Animator, ease_in_out
 from .downloads import DownloadsController
 from .player import Player
 from .playqueue import PlayQueue
-from .anim import Animator, ease_in_out
-from .theme import (FONT_FAMILY, blend, dominant_color, enable_dpi_awareness, palette,
-                    readable_on, seed_color, style_titlebar, system_is_dark, text_on, vivid)
-from .widgets import (Cover, Equalizer, Header, IconButton, NowPlaying, PlayButton, RowList,
-                      SearchBox, Slider, StatusLine, TextButton, WaveSeek, ui_fonts)
+from .theme import (
+    FONT_FAMILY,
+    blend,
+    dominant_color,
+    enable_dpi_awareness,
+    palette,
+    readable_on,
+    seed_color,
+    style_titlebar,
+    system_is_dark,
+    vivid,
+)
+from .widgets import (
+    Cover,
+    Equalizer,
+    Header,
+    IconButton,
+    NowPlaying,
+    PlayButton,
+    RowList,
+    SearchBox,
+    Slider,
+    StatusLine,
+    TextButton,
+    WaveSeek,
+    ui_fonts,
+)
 
 log = _log.get("ui")
 FONT = (FONT_FAMILY, 10)
@@ -82,9 +106,7 @@ class App(tk.Tk):
         self.genre_filter: set[str] = set()
         self.side_items: list[tuple[str, str | None, str]] = []  # (tipo, nombre, texto)
         self.sel_keys: set[tuple[str, str | None]] = set()
-        self.view_kind = "all"   # all | lib | liked | recent | top | pl
-        self.view_name: str | None = None  # nombre de la playlist en view_kind == "pl"
-        self.playlists: list[dict] = []
+        self.view_kind = "all"   # all | lib | liked | recent | top
         self.liked: set[str] = set()  # ids marcados con «Me gusta» (se recarga con la biblioteca)
         self.yt_genres: list[str] = []
         self.yt_failed = False
@@ -110,6 +132,9 @@ class App(tk.Tk):
         self.scheme: dict[str, str] = {}
         self.dl_paused = False
         self.prefs = prefs.load()
+        self.cookies = str(self.prefs.get("cookies") or config.COOKIES_FROM_BROWSER or "")
+        self._cookies_dialog_shown = False
+        self._crash_shown = False
         self.dark = self.prefs.get("dark", system_is_dark())
         self.pq.shuffle = bool(self.prefs.get("shuffle", False))
         self.pq.repeat = int(self.prefs.get("repeat", 0))
@@ -155,12 +180,15 @@ class App(tk.Tk):
         threading.Thread(target=self.dl.start_service, daemon=True).start()
         self.bind("<Control-g>", lambda e: (self.open_prompt(), "break")[1])  # «Música por frase»
         self.bind("<Control-l>", lambda e: (self.toggle_like(), "break")[1])  # Me gusta
+        self.bind("<Control-f>", lambda e: (self.search_box.entry.focus_set(), "break")[1])
+        self.bind("<Control-a>", self._select_all)  # todas las canciones de la vista
         self.bind("<Escape>", self._escape)
         self.play_pool.submit(self._warm_up)
         threading.Thread(target=self._net_loop, daemon=True).start()
         self.after(FADE_TICK_MS, self._fade_tick)
         self.after(100, self._pump)
         self.after(400, self._tick)
+        self.after(1200, self._check_environment)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.anim.tween("window", 260, lambda p: self.attributes("-alpha", p),
                         done=lambda: self.attributes("-alpha", 1.0))
@@ -188,16 +216,12 @@ class App(tk.Tk):
         self.query = tk.StringVar()
         self.search_box = SearchBox(top, self.anim, k, f["body"], self.query,
                                     "Buscar canciones, artistas o álbumes…")
-        self.search_box.grid(row=0, column=1, sticky="w", pady=(int(14 * k), int(6 * k)))
+        self.search_box.grid(row=0, column=1, sticky="w", pady=(int(6 * k), 0))
         self.entry = self.search_box.entry
         self.entry.bind("<Return>", lambda e: self.search("songs"))
         self.query.trace_add("write", lambda *a: self._on_query())
-        self.btn_genre = TextButton(top, self.anim, "Por género", f["body"],
-                                    lambda: self.search("genre"))
-        self.btn_genre.grid(row=0, column=3)
         self.btn_dl = TextButton(top, self.anim, "Descargar", f["body"], self.download_selected)
         self.btn_dl.grid(row=0, column=4)
-        self.btn_genre.set_visible(False)
         self.btn_dl.set_visible(False)
         # «Descargas» (la cola de descargas), distinta de la cola de reproducción (btn_queue)
         self.btn_downloads = IconButton(
@@ -242,7 +266,6 @@ class App(tk.Tk):
         # la rueda también desplaza la lista si el puntero cae en el margen o en la barra
         for w in (side, self.sb_genres):
             w.bind("<MouseWheel>", self.genres._wheel)
-        self.genres.bind("<Button-3>", self._sidebar_context)
 
         mid = tk.Frame(content)
         mid.grid(row=0, column=1, sticky="nsew", padx=(0, int(10 * k)))
@@ -280,9 +303,16 @@ class App(tk.Tk):
         self.drawer_title.pack(fill="x", padx=int(16 * k), pady=(int(14 * k), 0))
         self.drawer_sub = tk.Label(self.drawer, font=f["small"], anchor="w")
         self.drawer_sub.pack(fill="x", padx=int(16 * k), pady=(0, int(8 * k)))
+        self.drawer_hint = tk.Label(
+            self.drawer, text="Arrastra para ordenar · clic derecho o Supr para quitar",
+            font=f["small"], anchor="w")
+        self.drawer_hint.pack(fill="x", padx=int(16 * k), pady=(0, int(8 * k)))
         self.drawer_list = RowList(self.drawer, self.anim, k, f, multi=False,
-                                   on_activate=lambda i: self._queue_jump())
+                                   on_activate=lambda i: self._queue_jump(),
+                                   on_move=self._queue_move, on_context=self._queue_context)
         self.drawer_list.pack(fill="both", expand=True, padx=int(4 * k))
+        for seq in ("<Delete>", "<BackSpace>"):
+            self.drawer_list.bind(seq, lambda e: self._queue_remove())
 
         # la onda es la barra de progreso y a la vez el borde superior del reproductor
         playing = lambda: self.player.loaded and not self.player.paused  # noqa: E731
@@ -399,9 +429,11 @@ class App(tk.Tk):
         self.drawer_line.configure(bg=p["line"])
         self.drawer_title.configure(bg=p["panel"], fg=p["fg"])
         self.drawer_sub.configure(bg=p["panel"], fg=p["dim"])
+        self.drawer_hint.configure(bg=p["panel"], fg=p["faint"])
         self.drawer_list.restyle(bg=p["panel"], fg=p["fg"], dim=p["dim"], faint=p["faint"],
                                  sel=blend(p["panel"], p["fg"], 0.08),
-                                 hover=blend(p["panel"], p["fg"], 0.04))
+                                 hover=blend(p["panel"], p["fg"], 0.04),
+                                 accent=p["accent"])
         s.configure(".", background=p["bg"], foreground=p["fg"], font=FONT,
                     bordercolor=p["line"], lightcolor=p["bg"], darkcolor=p["bg"],
                     troughcolor=p["panel"], focuscolor=p["bg"])
@@ -422,7 +454,7 @@ class App(tk.Tk):
                     relief="flat", padding=(int(12 * k), int(6 * k)))
         s.map("TButton", background=[("pressed", p["line"]), ("active", p["sel"])],
               foreground=[("disabled", p["faint"])])
-        s.configure("Accent.TButton", background=p["accent"], foreground=text_on(p["accent"]),
+        s.configure("Accent.TButton", background=p["accent"], foreground=p["accent_fg"],
                     borderwidth=0, relief="flat", padding=(int(12 * k), int(6 * k)))
         s.map("Accent.TButton",
               background=[("pressed", blend(p["accent"], p["fg"], 0.14)),
@@ -460,7 +492,7 @@ class App(tk.Tk):
         strength = (1.0 if color else 0.4) * (1.0 if self.dark else 0.7)
         band = blend(p["panel"], tint, 0.11 * strength)
         accent = readable_on(color, band) if color else p["accent"]
-        return dict(accent=accent, on_accent=text_on(accent), band=band,
+        return dict(accent=accent, on_accent=p["accent_fg"], band=band,
                     top=blend(p["bg"], tint, 0.16 * strength))
 
     def _paint(self, c: dict[str, str]) -> None:
@@ -469,10 +501,10 @@ class App(tk.Tk):
         top, band, accent = c["top"], c["band"], c["accent"]
         self.top.configure(bg=top)
         self.mark.configure(bg=top, fg=p["fg"])
-        self.search_box.restyle(bg=top, field=blend(p["bg"], p["fg"], 0.07), fg=p["fg"], dim=p["dim"],
-                                line=blend(p["bg"], p["fg"], 0.13), accent=accent)
-        for b in (self.btn_genre, self.btn_dl):
-            b.restyle(top, p["fg"], p["dim"])
+        self.search_box.restyle(bg=top, field=p["raised"], fg=p["fg"], dim=p["dim"],
+                                faint=p["faint"], line=blend(p["bg"], p["fg"], 0.18),
+                                accent=accent)
+        self.btn_dl.restyle(top, p["fg"], p["dim"])
         for b in self.top_icons:
             b.restyle(top, p["fg"], p["dim"], accent)
         self.header.restyle(top, p["bg"], p["fg"], p["dim"])
@@ -524,7 +556,6 @@ class App(tk.Tk):
         for t in self.library:
             g = t["genre"] or "Sin género"
             counts[g] = counts.get(g, 0) + 1
-        self.playlists = playlists.all_lists()
         items = [("all", None, "Todo"), ("liked", None, "Me gusta"),
                  ("recent", None, "Recientes"), ("top", None, "Más escuchado")]
         rights = [str(len(self.library)), str(len(self.liked)), "", ""]
@@ -541,17 +572,7 @@ class App(tk.Tk):
             items.append(("hdr", None, "YouTube · sin conexión" if self.yt_failed
                           else "YouTube · cargando…"))
             rights.append("")
-        items.append(("hdr", None, "Playlists"))
-        rights.append("")
-        items.append(("newpl", None, "＋ Nueva playlist"))
-        rights.append("")
-        for playlist in self.playlists:
-            items.append(("pl", playlist["name"], playlist["name"]))
-            rights.append(str(playlist["tracks"]))
         self.side_items = items
-        if self.view_kind == "pl" and self.view_name not in {p["name"] for p in self.playlists}:
-            self.view_kind, self.view_name = "all", None
-            self.sel_keys = {("all", None)}
         self.genres.sel.clear()
         self.genres.set_items([dict(text=label, right=right, hdr=k == "hdr")
                                for (k, _n, label), right in zip(items, rights)])
@@ -568,14 +589,10 @@ class App(tk.Tk):
         sel = [s for s in sel if s[0] != "hdr"]
         if not sel:
             return
-        if any(k == "newpl" for k, _n, _l in sel):
-            self.create_playlist()
-            self._build_sidebar()  # si se canceló, recupera la selección anterior
-            return
         had_query = bool(self.query.get())
-        special = next((s for s in sel if s[0] in ("liked", "recent", "top", "pl")), None)
+        special = next((s for s in sel if s[0] in ("liked", "recent", "top")), None)
         if special:
-            self.view_kind, self.view_name = special[0], special[1]
+            self.view_kind = special[0]
             self.genre_filter = set()
             self.yt_sel = []
             self.sel_keys = {(special[0], special[1])}
@@ -588,7 +605,6 @@ class App(tk.Tk):
             lib_names = {n for k, n, _l in sel if k == "lib"}
             wants_all = any(k == "all" for k, _n, _l in sel)
             self.view_kind = "all" if wants_all or not lib_names else "lib"
-            self.view_name = None
             self.genre_filter = set() if wants_all else lib_names
             self.yt_sel = [n for k, n, _l in sel if k == "yt"]
             if self._debounce:
@@ -608,14 +624,13 @@ class App(tk.Tk):
 
     def _on_query(self) -> None:
         q = self.query.get().strip()
-        if q and self.view_kind in ("liked", "recent", "top", "pl"):
+        if q and self.view_kind in ("liked", "recent", "top"):
             # buscar desde una vista especial busca en toda la biblioteca
-            self.view_kind, self.view_name = "all", None
+            self.view_kind = "all"
             self.genre_filter = set()
             self.yt_sel = []
             self.sel_keys = {("all", None)}
             self._build_sidebar()
-        self.btn_genre.set_visible(bool(q))
         if self.remote_src in ("songs", "genre") and q != self.remote_q:
             self.remote, self.remote_src = [], None  # resultados de YT de otra búsqueda
         self.refresh_view()
@@ -637,8 +652,6 @@ class App(tk.Tk):
             local, remote = self._history_rows(history.recent(200)), []
         elif self.view_kind == "top":
             local, remote = self._history_rows(history.most_played(200)), []
-        elif self.view_kind == "pl":
-            local, remote = playlists.tracks(self.view_name), []
         else:
             local = self.library
             if self.genre_filter:
@@ -746,8 +759,6 @@ class App(tk.Tk):
             return "Recientes"
         if self.view_kind == "top":
             return "Más escuchado"
-        if self.view_kind == "pl":
-            return f"Playlist · {self.view_name}"
         names = sorted(self.genre_filter or set(self.yt_sel))
         if not names:
             return "Tu biblioteca"
@@ -840,8 +851,6 @@ class App(tk.Tk):
             text = "Nada en tu biblioteca. Pulsa Intro para buscar en YouTube."
         elif self.view_kind == "liked":
             text = "Aún no has marcado ninguna canción. Botón derecho → Me gusta."
-        elif self.view_kind == "pl":
-            text = "Playlist vacía. Clic derecho en una canción → «Añadir a playlist»."
         elif self.view_kind in ("recent", "top"):
             text = "Todavía no hay reproducciones registradas."
         else:
@@ -858,9 +867,6 @@ class App(tk.Tk):
 
     def sort_by(self, col: str) -> None:
         if col == "state":
-            return
-        if self.view_kind == "pl":
-            self.status.configure(text="Las playlists conservan su orden: usa «Mover arriba/abajo»")
             return
         if self.sort and self.sort[0] == col:
             self.sort = (col, True) if not self.sort[1] else None  # asc → desc → sin orden
@@ -883,113 +889,11 @@ class App(tk.Tk):
     def _selected(self) -> list[dict]:
         return [self.rows[i] for i in sorted(int(i) for i in self.tree.selection())]
 
-    # ---------- playlists ----------
+    # ---------- menús ----------
     def _menu(self, master=None) -> tk.Menu:
         p = self.pal
         return tk.Menu(master or self, tearoff=0, bg=p["panel"], fg=p["fg"],
                        activebackground=p["sel"], activeforeground=p["fg"], borderwidth=0)
-
-    def create_playlist(self) -> str | None:
-        name = simpledialog.askstring("Nueva playlist", "Nombre:", parent=self)
-        if name is None or not name.strip():
-            return None
-        try:
-            playlists.create(name)
-        except playlists.PlaylistError as exc:
-            messagebox.showerror("Playlist", str(exc), parent=self)
-            return None
-        name = name.strip()
-        self.view_kind, self.view_name = "pl", name
-        self.sel_keys = {("pl", name)}
-        self.refresh_library()
-        self.status.configure(text=f"Playlist '{name}' creada")
-        return name
-
-    def rename_playlist(self, name: str) -> None:
-        new = simpledialog.askstring("Renombrar playlist", "Nuevo nombre:",
-                                     initialvalue=name, parent=self)
-        if new is None or not new.strip() or new.strip() == name:
-            return
-        try:
-            playlists.rename(name, new)
-        except playlists.PlaylistError as exc:
-            messagebox.showerror("Playlist", str(exc), parent=self)
-            return
-        new = new.strip()
-        self.sel_keys = {(k, new if k == "pl" and n == name else n) for k, n in self.sel_keys}
-        if self.view_kind == "pl" and self.view_name == name:
-            self.view_name = new
-        self.refresh_library()
-        self.status.configure(text=f"Playlist renombrada: '{new}'")
-
-    def delete_playlist(self, name: str) -> None:
-        if not messagebox.askyesno(
-                "Borrar playlist", f"¿Borrar la playlist '{name}'?\n"
-                                   "Sus canciones siguen en la biblioteca.", parent=self):
-            return
-        try:
-            playlists.delete(name)
-        except playlists.PlaylistError as exc:
-            messagebox.showerror("Playlist", str(exc), parent=self)
-            return
-        self.sel_keys = {k for k in self.sel_keys if not (k[0] == "pl" and k[1] == name)}
-        if self.view_kind == "pl" and self.view_name == name:
-            self.view_kind, self.view_name = "all", None
-            self.sel_keys = {("all", None)}
-        self.refresh_library()
-        self.status.configure(text=f"Playlist '{name}' borrada")
-
-    def _play_playlist(self, name: str) -> None:
-        self.view_kind, self.view_name = "pl", name
-        self.sel_keys = {("pl", name)}
-        self.sort = None
-        if self.query.get():
-            self.query.set("")
-        self.refresh_library()
-        if self.rows:
-            self.play_index(0)
-
-    def _sidebar_context(self, e) -> None:
-        i = self.genres.index_at(e.y)
-        if i is None or not 0 <= i < len(self.side_items):
-            return
-        kind, name, _label = self.side_items[i]
-        if kind != "pl" or name is None:
-            return
-        self.genres.selection_clear()
-        self.genres.selection_set(i)
-        self._pick_genre()
-        m = self._menu()
-        m.add_command(label="Reproducir", command=lambda: self._play_playlist(name))
-        m.add_separator()
-        m.add_command(label="Renombrar…", command=lambda: self.rename_playlist(name))
-        m.add_command(label="Borrar…", command=lambda: self.delete_playlist(name))
-        try:
-            m.tk_popup(e.x_root, e.y_root)
-        finally:
-            m.grab_release()
-
-    def _add_to_playlist(self, name: str, tracks: list[dict]) -> None:
-        ids = [t["video_id"] for t in tracks
-               if "path" in t or t["video_id"] in self.lib_by_id]
-        if not ids:
-            self.status.configure(text="Solo se pueden añadir canciones descargadas")
-            return
-        try:
-            added = playlists.add(name, ids)
-        except playlists.PlaylistError as exc:
-            messagebox.showerror("Playlist", str(exc), parent=self)
-            return
-        self._build_sidebar()  # actualiza el contador de la playlist
-        if self.view_kind == "pl" and self.view_name == name:
-            self.refresh_view()
-        self.status.configure(text=f"{added} añadidas a '{name}'" if added
-                              else f"Ya estaban en '{name}'")
-
-    def _new_playlist_with(self, tracks: list[dict]) -> None:
-        name = self.create_playlist()
-        if name:
-            self._add_to_playlist(name, tracks)
 
     def toggle_like(self) -> None:
         """Marca o desmarca con «Me gusta» las canciones seleccionadas de la biblioteca."""
@@ -1006,37 +910,6 @@ class App(tk.Tk):
             self.tree.selection_set(keep)
         self.status.configure(text=f"{len(picks)} en Me gusta" if want
                               else f"{len(picks)} fuera de Me gusta")
-
-    def remove_from_playlist(self) -> None:
-        if self.view_kind != "pl" or not self.view_name:
-            return
-        ids = [t["video_id"] for t in self._selected()]
-        if not ids:
-            return
-        removed = playlists.remove(self.view_name, ids)
-        self.refresh_library()
-        self.status.configure(text=f"{removed} quitadas de '{self.view_name}'")
-
-    def move_in_playlist(self, delta: int) -> None:
-        if self.view_kind != "pl" or not self.view_name:
-            return
-        picks = self._selected()
-        if len(picks) != 1:
-            return
-        vid = picks[0]["video_id"]
-        ordered = [t["video_id"] for t in playlists.tracks(self.view_name)]
-        if vid not in ordered:
-            return
-        index = ordered.index(vid)
-        target = max(0, min(len(ordered) - 1, index + delta))
-        if target == index:
-            return
-        playlists.move(self.view_name, vid, target)
-        self.refresh_view()
-        iid = self.vid_iid.get(vid)
-        if iid is not None:
-            self.tree.selection_set(iid)
-            self.tree.see(iid)
 
     # ---------- duplicados y etiquetas ----------
     def find_duplicates(self) -> None:
@@ -1112,10 +985,10 @@ class App(tk.Tk):
         self.status.configure(text=f"{count} canciones quitadas de la biblioteca")
 
     def update_components(self) -> None:
-        """Actualiza yt-dlp y ytmusicapi sin cerrar la ventana (pip en segundo plano)."""
+        """Actualiza yt-dlp y ytmusicapi sin cerrar la ventana."""
         if not messagebox.askyesno(
                 "Actualizar componentes",
-                "Se actualizarán yt-dlp y ytmusicapi con pip.\n\n"
+                "Se buscará la última versión de yt-dlp (y, en desarrollo, también ytmusicapi).\n\n"
                 "Conviene hacerlo sin descargas en curso. Al terminar habrá que reiniciar "
                 "la ventana para usar la versión nueva.\n\n¿Continuar?",
                 parent=self):
@@ -1145,9 +1018,9 @@ class App(tk.Tk):
     def _load_yt_genres(self) -> None:
         def work() -> None:
             try:
-                from ..core import genres, ytsearch
-                # lo colombiano y lo más escuchado en Colombia primero; después el resto de YouTube
-                self.q.put(("genres", genres.recommended_names(ytsearch.genre_categories())))
+                from ..core import genres
+                # géneros fijos del sidebar
+                self.q.put(("genres", genres.sidebar_genres()))
             except Exception as exc:  # noqa: BLE001 - sin internet
                 _log.failure(log, "no se pudieron cargar los géneros de YT Music", exc)
                 self.q.put(("genres", None))
@@ -1250,27 +1123,54 @@ class App(tk.Tk):
         self.show_page("prompt")
 
     def open_import(self) -> None:
-        """Pide una URL de YouTube Music y encola el álbum, playlist, artista o canción."""
-        url = simpledialog.askstring(
-            "Importar de YouTube Music",
-            "URL de álbum, playlist, artista o canción:", parent=self)
-        if not url or not url.strip():
+        """Abre «Importar de YouTube Music»: pega un enlace y encola lo que aún no tengas."""
+        self.show_page("import")
+
+    def open_health(self) -> None:
+        """Abre el diagnóstico del entorno (Node, ffmpeg, cookies, carpetas…)."""
+        self.show_page("health")
+
+    def _check_environment(self) -> None:
+        """Avisa al arrancar de lo que impedirá descargar, sin bloquear la ventana."""
+        try:
+            problems = health.problems()
+        except Exception:  # noqa: BLE001 - una comprobación rota no debe impedir usar la app
             return
-        self.status.configure(text="Leyendo la lista de YouTube Music…")
+        if problems:
+            self.status.configure(text=problems[0])
 
-        def work() -> None:
-            try:
-                label, tracks = importer.fetch(url, 200)
-            except importer.ImportFailure as exc:
-                self.q.put(("import_error", str(exc)))
-                return
-            except Exception as exc:  # noqa: BLE001 - la ventana sigue funcionando
-                _log.failure(log, "importación fallida", exc)
-                self.q.put(("import_error", str(exc)))
-                return
-            self.q.put(("import_ok", label, tracks))
+    def set_cookies(self, browser: str | None) -> None:
+        """Guarda el navegador de cookies y lo aplica a las próximas descargas."""
+        browser = (browser or "").strip()
+        if browser == self.cookies:
+            return
+        self.cookies = browser
+        self.dl.configure_cookies(browser)
+        prefs.save(self._prefs_state())
+        self.status.configure(
+            text=(f"Cookies de YouTube: {browser}. Se usarán en las próximas descargas."
+                  if browser else "Cookies de YouTube desactivadas."))
+        if browser:
+            self._cookies_dialog_shown = True
 
-        threading.Thread(target=work, daemon=True).start()
+    def import_loaded(self, label: str, tracks: list[dict]) -> None:
+        """Muestra lo importado en la biblioteca y encola solo las canciones nuevas."""
+        new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
+        self.view_kind = "all"
+        self.genre_filter = set()
+        self.yt_sel = []
+        self.sel_keys = {("all", None)}
+        known = {t["video_id"] for t in tracks}
+        self.remote = tracks + [t for t in self.remote if t["video_id"] not in known]
+        self.remote_src, self.remote_q = "import", ""
+        self._build_sidebar()
+        self.refresh_view()
+        self._fade_rows()
+        if new:
+            self.dl.submit(new, None)
+            self.status.configure(text=f"{label}: {len(new)} canciones en descarga")
+        else:
+            self.status.configure(text=f"{label}: ya estaban todas en tu biblioteca")
 
     # ---------- páginas integradas ----------
     def _ensure_page(self, name: str):
@@ -1280,9 +1180,15 @@ class App(tk.Tk):
         if name == "prompt":
             from .prompt_dialog import PromptPage
             page = PromptPage(self)
+        elif name == "import":
+            from .import_page import ImportPage
+            page = ImportPage(self)
         elif name == "downloads":
             from .queue_panel import DownloadsPage
             page = DownloadsPage(self)
+        elif name == "health":
+            from .health_page import HealthPage
+            page = HealthPage(self)
         else:
             raise KeyError(name)
         self.pages[name] = page
@@ -1329,20 +1235,13 @@ class App(tk.Tk):
         return "break"
 
     def _refresh_nav(self) -> None:
-        for name, button in (("prompt", self.btn_prompt), ("downloads", self.btn_downloads)):
+        for name, button in (("prompt", self.btn_prompt), ("import", self.btn_import),
+                             ("downloads", self.btn_downloads)):
             button.set_active(self.active_page is not None and self.active_page is self.pages.get(name))
 
     def retry_failed_downloads(self) -> int:
         """Devuelve las descargas fallidas a la cola. Devuelve cuántas eran."""
         return self.dl.retry_failed()
-
-    def prioritize_downloads(self, ids: list[str]) -> int:
-        """Pone canciones de la cola al frente; una fallida vuelve a la cola. Devuelve cuántas."""
-        return self.dl.prioritize(ids)
-
-    def remove_downloads(self, ids: list[str]) -> int:
-        """Quita canciones de la cola. Las que ya se están bajando no se pueden quitar."""
-        return self.dl.remove(ids)
 
     @property
     def service(self):
@@ -1411,6 +1310,20 @@ class App(tk.Tk):
             if self._is_remote(t):
                 self._resolve_ahead([t["video_id"]])
 
+    def _select_all(self, _e=None) -> str | None:
+        """Selecciona todas las canciones de la vista actual (Ctrl+A)."""
+        # En un campo de texto, Ctrl+A debe seguir seleccionando el texto.
+        if self.active_page is not None or isinstance(
+                self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):
+            return None
+        rows = self.tree.get_children()
+        if rows:
+            focus = self.tree.focus()
+            self.tree.selection_set(rows)
+            if focus not in rows:
+                self.tree.focus(rows[0])
+        return "break"
+
     def _prefetch_next(self) -> None:
         self._resolve_ahead([t["video_id"] for t in self.pq.next_tracks() if self._is_remote(t)])
 
@@ -1457,23 +1370,9 @@ class App(tk.Tk):
         local = [t for t in picks if "path" in t or t["video_id"] in self.lib_by_id]
         m.add_separator()
         if local:
-            sub = self._menu(m)
-            for playlist in self.playlists:
-                sub.add_command(
-                    label=playlist["name"],
-                    command=lambda name=playlist["name"]: self._add_to_playlist(name, local))
-            if self.playlists:
-                sub.add_separator()
-            sub.add_command(label="Nueva playlist…", command=lambda: self._new_playlist_with(local))
-            m.add_cascade(label="Añadir a playlist", menu=sub)
             all_liked = all(t["video_id"] in self.liked for t in local)
             m.add_command(label="Quitar de Me gusta" if all_liked else "Me gusta",
                           command=self.toggle_like)
-        if self.view_kind == "pl":
-            m.add_command(label="Quitar de la playlist", command=self.remove_from_playlist)
-            if len(picks) == 1:
-                m.add_command(label="Mover arriba", command=lambda: self.move_in_playlist(-1))
-                m.add_command(label="Mover abajo", command=lambda: self.move_in_playlist(1))
         if any(t["video_id"] not in self.lib_by_id for t in picks):
             m.add_command(label="Descargar", command=self.download_selected)
         if len(local) == 1:
@@ -1661,6 +1560,7 @@ class App(tk.Tk):
         self.drawer.lift()
         if opening:
             self._refresh_queue()
+            self.drawer_list.focus_set()
 
         def step(p: float) -> None:
             self._drawer_x = int(start + (to - start) * p)
@@ -1675,19 +1575,35 @@ class App(tk.Tk):
         p = self.pal
         items: list[dict] = []
         self.queue_map = []
+
+        def header(text: str) -> None:
+            items.append(dict(text=text, hdr=True))
+            self.queue_map.append(("hdr", 0))
+
+        def add(t: dict, kind: str, idx: int, **extra) -> None:
+            item = dict(text=f"{t['title']} — {t['artist']}", **extra)
+            if kind in ("up", "ctx"):  # solo lo que queda por delante se puede arrastrar
+                item["move"] = kind
+            items.append(item)
+            self.queue_map.append((kind, idx))
+
         cur = self.pq.current(self.playing_vid)
         if cur:
-            items.append(dict(text=f"{cur['title']} — {cur['artist']}", color=self.scheme["accent"]))
-            self.queue_map.append(("cur", 0))
-        for i, t in enumerate(self.pq.up_next):
-            items.append(dict(text=f"{t['title']} — {t['artist']}", right="＋"))
-            self.queue_map.append(("up", i))
-        for j in range(self.pq.opos + 1, len(self.pq.order)):
-            t = self.pq.ctx[self.pq.order[j]]
-            remote = self._is_remote(t)
-            items.append(dict(text=f"{t['title']} — {t['artist']}", right="☁" if remote else "",
-                              color=p["faint"] if remote and not self.online else None))
-            self.queue_map.append(("ctx", j))
+            header("Sonando ahora")
+            add(cur, "cur", 0, color=self.scheme["accent"])
+        # lo que pusiste tú va aparte de lo que llega solo (similares o respaldo)
+        if self.pq.up_next:
+            header(f"Añadidas por ti · {len(self.pq.up_next)}")
+            for i, t in enumerate(self.pq.up_next):
+                add(t, "up", i, right="＋")
+        upcoming = range(self.pq.opos + 1, len(self.pq.order))
+        if upcoming:
+            header("Siguen automáticamente" if self.pq.auto_ctx else "Siguen en la lista")
+            for j in upcoming:
+                t = self.pq.ctx[self.pq.order[j]]
+                remote = self._is_remote(t)
+                add(t, "ctx", j, right="☁" if remote else "",
+                    color=p["faint"] if remote and not self.online else None)
         lb.sel.clear()
         lb.set_items(items)
         kind = "Cola automática" if self.pq.auto_ctx else "De la lista"
@@ -1695,14 +1611,87 @@ class App(tk.Tk):
 
     def _queue_jump(self, _e=None) -> None:
         sel = self.queue_lb.curselection() if self.queue_lb else ()
-        if not sel or sel[0] >= len(self.queue_map):
+        if sel:
+            self._queue_jump_at(sel[0])
+
+    def _queue_jump_at(self, item: int) -> None:
+        if not 0 <= item < len(self.queue_map):
             return
-        kind, idx = self.queue_map[sel[0]]
+        kind, idx = self.queue_map[item]
         if kind == "up":
-            self._play_track(self.pq.up_next.pop(idx))
+            track = self.pq.take_up_next(idx)
+            if track is not None:
+                self._play_track(track)
         elif kind == "ctx":
             self.pq.opos = idx
             self._play_track(self.pq.ctx[self.pq.order[idx]])
+
+    # ---------- edición de la cola ----------
+    def _queue_move(self, src: int, dst: int) -> None:
+        """Mueve una fila dentro de su sección; `dst` es la posición de inserción."""
+        if not 0 <= src < len(self.queue_map):
+            return
+        kind, idx = self.queue_map[src]
+        if kind == "up":
+            if dst in (idx, idx + 1):
+                return  # se suelta donde estaba
+            track = self.pq.take_up_next(idx)
+            if track is None:
+                return
+            self.pq.insert_up_next(dst - 1 if dst > idx else dst, track)
+        elif kind == "ctx":
+            positions = [v for k, v in self.queue_map if k == "ctx"]
+            target = positions[dst] if dst < len(positions) else len(self.pq.order)
+            if target in (idx, idx + 1):
+                return
+            track = self.pq.take_upcoming(idx)
+            if track is None:
+                return
+            self.pq.insert_upcoming(target - 1 if target > idx else target, track)
+        else:
+            return
+        self._refresh_queue()
+        self._prefetch_next()
+        self.dl.download_ahead()
+
+    def _queue_remove(self, item: int | None = None) -> str | None:
+        """Quita de la cola la fila elegida (o la seleccionada, con Supr)."""
+        if item is None:
+            sel = self.queue_lb.curselection() if self.queue_lb else ()
+            if not sel:
+                return None
+            item = sel[0]
+        if not 0 <= item < len(self.queue_map):
+            return None
+        kind, idx = self.queue_map[item]
+        if kind == "up":
+            track = self.pq.take_up_next(idx)
+        elif kind == "ctx":
+            track = self.pq.take_upcoming(idx)
+        else:
+            return None
+        if track is None:
+            return None
+        self.status.configure(text=f"Quitada de la cola: {track['title']} — {track['artist']}")
+        self._refresh_queue()
+        self._prefetch_next()
+        return "break"
+
+    def _queue_context(self, item: int, x: int, y: int) -> None:
+        if not 0 <= item < len(self.queue_map):
+            return
+        kind, _idx = self.queue_map[item]
+        if kind not in ("up", "ctx"):
+            return
+        m = self._menu(self.drawer_list)
+        m.add_command(label="Reproducir ahora",
+                      command=lambda: self._queue_jump_at(item))
+        m.add_command(label="Quitar de la cola",
+                      command=lambda: self._queue_remove(item))
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
 
     def _play_track(self, t: dict, how: str = "manual") -> None:
         """`how`: "auto" = fin natural (mezcla con la que suena), "manual" = la pediste tú
@@ -2118,6 +2107,30 @@ class App(tk.Tk):
         self._set_ambient((dominant_color(img) if img else None)
                           or (seed_color(seed) if seed else None))
 
+    # ---------- errores ----------
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """Captura los fallos de callbacks de Tk: sin esto, en el .exe no se ve nada."""
+        _log.failure(_log.get("ui"), "fallo en la interfaz", val)
+        details = "".join(traceback.format_exception(exc, val, tb))
+        self._show_crash("La ventana encontró un error, pero puedes seguir usándola.", details)
+
+    def _show_crash(self, message: str, details: str = "") -> None:
+        """Muestra el fallo y enseña dónde está el registro. Como mucho, una vez cada 5 s."""
+        if self._crash_shown:
+            return
+        self._crash_shown = True
+        try:
+            messagebox.showerror(
+                "Sound",
+                f"{message}\n\nEl detalle completo está en:\n{config.LOG_PATH}",
+                parent=self)
+            if messagebox.askyesno("Sound", "¿Abrir la carpeta del registro?", parent=self):
+                health.open_path(config.LOG_PATH.parent)
+        except Exception:  # noqa: BLE001 - si ni el diálogo funciona, al menos queda el log
+            pass
+        finally:
+            self.after(5000, lambda: setattr(self, "_crash_shown", False))
+
     # ---------- cola de eventos de hilos ----------
     def _pump(self) -> None:
         try:
@@ -2172,32 +2185,30 @@ class App(tk.Tk):
                         self._set_cover(ev[2])
                 elif kind == "queue_paused":
                     self._queue_paused_changed(ev[1])
-                elif kind == "import_ok":
-                    label, tracks = ev[1], ev[2]
-                    new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
-                    self.view_kind, self.view_name = "all", None
-                    self.genre_filter = set()
-                    self.yt_sel = []
-                    self.sel_keys = {("all", None)}
-                    known = {t["video_id"] for t in tracks}
-                    self.remote = tracks + [t for t in self.remote if t["video_id"] not in known]
-                    self.remote_src, self.remote_q = "import", ""
-                    self._build_sidebar()
-                    self.refresh_view()
-                    self._fade_rows()
-                    if new:
-                        self.dl.submit(new, None)
-                        self.status.configure(text=f"{label}: {len(new)} canciones en descarga")
-                    else:
-                        self.status.configure(text=f"{label}: ya estaban todas en tu biblioteca")
-                elif kind == "import_error":
-                    self.status.configure(text=f"No se pudo importar: {ev[1]}")
+                elif kind == "needs_cookies":
+                    self.status.configure(text=ev[1])
+                    if not self._cookies_dialog_shown:
+                        self._cookies_dialog_shown = True
+                        messagebox.showinfo(
+                            "YouTube pide iniciar sesión",
+                            "YouTube está pidiendo iniciar sesión o verificar que no eres un "
+                            "bot.\n\nAbre «Descargas» y elige, en «Cookies de YouTube», el "
+                            "navegador donde tengas la sesión de YouTube iniciada. Después "
+                            "pulsa «Reintentar».\n\nEl detalle queda en el registro.",
+                            parent=self)
+                elif kind == "crash":
+                    self._show_crash(ev[1], ev[2])
+                elif kind == "health":
+                    page = self.pages.get("health")
+                    if page is not None:
+                        page.set_checks(ev[1])
                 elif kind == "update_done":
                     if ev[1] == 0:
                         self.status.configure(text="Componentes actualizados. Reinicia la ventana "
                                                     "para usar la versión nueva.")
                     else:
-                        self.status.configure(text=f"No se pudo actualizar: {ev[2] or 'pip falló'}")
+                        self.status.configure(
+                            text=f"No se pudo actualizar: {ev[2] or 'falló la descarga'}")
                 elif kind == "gain":
                     self._gain_pending.discard(ev[1])
                     if self.normalize and self.playing_vid == ev[1] and ev[2] is not None:
@@ -2239,11 +2250,14 @@ class App(tk.Tk):
 
     # ---------- preferencias ----------
 
+    def _prefs_state(self) -> dict:
+        return {"dark": self.dark, "vol": self.vol.get(), "shuffle": self.pq.shuffle,
+                "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
+                "normalize": self.normalize, "cookies": self.cookies}
+
     def _close(self) -> None:
         self._save_session()
-        prefs.save({"dark": self.dark, "vol": self.vol.get(), "shuffle": self.pq.shuffle,
-                    "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
-                    "normalize": self.normalize})
+        prefs.save(self._prefs_state())
         for page in self.pages.values():
             page.deactivate()
         self.player.close()
@@ -2253,6 +2267,43 @@ class App(tk.Tk):
 
 
 def run() -> None:
+    try:
+        config.prepare()
+    except OSError as exc:
+        from tkinter import messagebox
+
+        messagebox.showerror(
+            "Sound", f"No se pudo crear la carpeta de datos:\n{config.DATA_DIR}\n\n{exc}")
+        return
     _log.setup()  # sin esto, los errores de la ventana no llegaban a sound.log
+    try:
+        report = config.migrate_legacy()
+    except Exception as exc:  # noqa: BLE001 - una migración rota no debe impedir abrir la app
+        _log.failure(_log.get("start"), "la migración de datos falló", exc)
+        report = {"moved": [], "failed": [str(exc)]}
+    for path in report["moved"]:
+        _log.get("start").info("migrado a la carpeta de datos: %s", path)
+    for problem in report["failed"]:
+        _log.get("start").warning("no se pudo migrar: %s", problem)
+    _log.session_header()
+
+    from .single_instance import SingleInstance
+
+    guard = SingleInstance()
+    if not guard.acquire():
+        return
     enable_dpi_awareness()
-    App().mainloop()
+    from .diagnostics import install
+
+    try:
+        app = App()
+    except Exception as exc:  # noqa: BLE001 - sin ventana, al menos un mensaje y el registro
+        _log.failure(_log.get("ui"), "no se pudo crear la ventana", exc)
+        from tkinter import messagebox
+
+        messagebox.showerror(
+            "Sound",
+            f"No se pudo abrir Sound.\n\n{exc}\n\nDetalle completo en:\n{config.LOG_PATH}")
+        raise
+    install(app)
+    app.mainloop()

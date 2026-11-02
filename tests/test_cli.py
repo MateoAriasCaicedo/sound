@@ -1,7 +1,8 @@
+import json
+from pathlib import Path
+
 import pytest
 import requests
-
-from pathlib import Path
 
 from app import cli
 from app.core import downloader, genres, health, library
@@ -65,6 +66,26 @@ def test_network_error_gets_a_friendly_message(monkeypatch, capsys):
 
     assert stop.value.code == 1
     assert "No pude conectar con YouTube Music" in capsys.readouterr().err
+
+
+def test_recuperar_encola_las_reproducciones_de_un_informe(tmp_path, capsys):
+    report = tmp_path / "recuperacion.json"
+    report.write_text(json.dumps({"reproducciones": [
+        {"video_id": "a", "title": "Tema A", "artist": "Artista"},
+        {"video_id": "a", "title": "Tema A", "artist": "Artista"},
+        {"video_id": "b", "title": "Tema B", "artist": "Otro"},
+    ]}), encoding="utf-8")
+
+    cli.main(["recuperar", "--desde", str(report), "--si"])
+
+    assert library.queue_counts()["pending"] == 2
+    assert "2 canciones en la cola" in capsys.readouterr().out
+
+
+def test_recuperar_without_a_report_fails_clearly(tmp_path):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["recuperar", "--desde", str(tmp_path / "no.json"), "--si"])
+    assert "no se pudo leer" in str(stop.value)
 
 
 def test_estado_lists_songs_without_cover(capsys):

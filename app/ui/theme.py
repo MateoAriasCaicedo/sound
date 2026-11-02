@@ -1,16 +1,16 @@
 """Paletas claro/oscuro, color derivado de la portada y detalles de ventana de Windows.
 
-Base neutra y un único acento. El acento y el tinte de la ventana salen de la canción que suena:
-de su portada o, si no tiene, de un color estable calculado a partir de su identificador.
+Base neutra y un único acento, negro sobre el tema claro y blanco sobre el oscuro. El tinte de la
+ventana sale de la canción que suena: de su portada o, si no tiene, del acento del tema.
 """
 import colorsys
 import hashlib
 
 LIGHT = dict(bg="#f8f8f9", panel="#f0f0f2", raised="#ffffff", fg="#17171a", dim="#6b6b74",
-             faint="#9c9ca6", accent="#e0482b", accent_fg="#ffffff", sel="#e7e7eb",
+             faint="#9c9ca6", accent="#000000", accent_fg="#ffffff", sel="#e7e7eb",
              hover="#efeff2", line="#e2e2e6", field="#ffffff", danger="#c93a3a")
 DARK = dict(bg="#101013", panel="#17171b", raised="#202026", fg="#eeeef2", dim="#92929c",
-            faint="#63636e", accent="#ff6a4d", accent_fg="#16110f", sel="#232329",
+            faint="#63636e", accent="#ffffff", accent_fg="#101013", sel="#232329",
             hover="#1a1a1f", line="#26262d", field="#1b1b20", danger="#ee6a66")
 
 FONT_FAMILY = "Segoe UI"

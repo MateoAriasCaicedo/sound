@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 from collections import Counter
@@ -7,7 +8,8 @@ from pathlib import Path
 import requests
 
 from . import cli_library
-from .core import downloader, genres, health, importer, library, log, loudness, prompt, ytsearch
+from .core import config, downloader, genres, health, importer, library, log, loudness, prompt, ytsearch
+from .core.errors import friendly
 
 GB = 1024**3
 
@@ -53,7 +55,12 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("normalizar", help="medir el volumen de la biblioteca (necesita ffmpeg)")
     s.add_argument("-n", type=int, help="medir solo las primeras N canciones")
     sub.add_parser("actualizar", help="actualizar yt-dlp y ytmusicapi (se rompen cuando YouTube cambia)")
-    cli_library.add_commands(sub)  # playlist, historial, top, duplicados, editar
+    sub.add_parser("diagnostico", help="comprobar Node, ffmpeg, internet, cookies, datos y espacio")
+    s = sub.add_parser("recuperar", help="volver a encolar pistas de un informe de recuperación")
+    s.add_argument("--desde", default=str(config.DATA_DIR / "recuperacion-biblioteca.json"),
+                   help="informe JSON con reproducciones (por defecto, el de la carpeta de datos)")
+    s.add_argument("--si", action="store_true", help="no pedir confirmación")
+    cli_library.add_commands(sub)  # historial, top, duplicados, editar
 
     args = p.parse_args(argv)
     if args.cmd in cli_library.COMMANDS:
@@ -63,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         for t in ytsearch.search_songs(args.query, args.n):
             print(f"{t['video_id']}  {t['artist']} - {t['title']}")
     elif args.cmd == "generos":
-        print("\n".join(genres.recommended_names(ytsearch.genre_categories())))  # lo colombiano primero
+        print("\n".join(genres.sidebar_genres()))  # solo los géneros del sidebar
     elif args.cmd == "genero":
         if genres.resolve(args.genero) is None:
             print(f"'{args.genero}' no es un género oficial de YouTube Music; uso la búsqueda libre.")
@@ -169,6 +176,43 @@ def main(argv: list[str] | None = None) -> None:
             print(f"{loudness.scan(pending, report)} canciones medidas")
     elif args.cmd == "actualizar":
         sys.exit(health.update_components())
+    elif args.cmd == "diagnostico":
+        for check in health.diagnostics(cookies=downloader.cookies_browser()):
+            icon = {"ok": "OK ", "warn": "AVISO", "fail": "FALLA"}.get(check["status"], "?")
+            print(f"{icon:5} {check['name']}: {check['detail']}")
+        print(f"\nDatos: {config.DATA_DIR}\nMúsica: {config.MUSIC_DIR}\nRegistro: {config.LOG_PATH}")
+    elif args.cmd == "recuperar":
+        _recuperar(args)
+
+
+def _recuperar(args: argparse.Namespace) -> None:
+    """Reencola las reproducciones de un informe de recuperación (p. ej. tras una migración)."""
+    path = Path(args.desde)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Error: no se pudo leer {path}: {exc}") from None
+    seen: set[str] = set()
+    tracks = []
+    for row in data.get("reproducciones", []) if isinstance(data, dict) else []:
+        video_id = row.get("video_id") if isinstance(row, dict) else None
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        tracks.append({"video_id": video_id,
+                       "title": row.get("title") or "Sin título",
+                       "artist": row.get("artist") or "Artista desconocido"})
+    if not tracks:
+        print("El informe no tiene reproducciones que se puedan reencolar.")
+        return
+    if not args.si:
+        answer = input(f"¿Encolar {len(tracks)} canciones del informe? [s/N] ")
+        if answer.strip().lower() not in {"s", "si", "sí", "y", "yes"}:
+            print("Cancelado.")
+            return
+    added = library.enqueue(tracks, None)
+    print(f"{added} canciones en la cola ({len(tracks) - added} ya estaban). "
+          "Continúa con: sound reanudar")
 
 
 def run() -> None:
@@ -183,10 +227,12 @@ def run() -> None:
 
     def report(t: dict, path, err) -> None:
         status = "OK " if not err else "ERR"
-        print(f"{status} {t['artist']} - {t['title']}" + (f" ({err})" if err else ""), flush=True)
+        detail = f" ({friendly(err)})" if err else ""
+        print(f"{status} {t['artist']} - {t['title']}{detail}", flush=True)
 
     def retrying(t: dict, attempt: int, delay: float, err: Exception) -> None:
-        print(f"... reintento {attempt} de {t['title']} en {delay:.0f}s ({str(err)[:80]})", flush=True)
+        print(f"... reintento {attempt} de {t['title']} en {delay:.0f}s "
+              f"({friendly(err)[:80]})", flush=True)
 
     try:
         counts = downloader.run_queue(on_done=report, on_retry=retrying)
@@ -205,13 +251,37 @@ def run() -> None:
 
 
 def entry() -> None:
+    try:
+        config.prepare()
+    except OSError as exc:
+        print(f"Error: no se pudo crear la carpeta de datos {config.DATA_DIR}: {exc}",
+              file=sys.stderr)
+        raise SystemExit(1) from None
     log.setup()
+    try:
+        report = config.migrate_legacy()
+    except Exception as exc:  # noqa: BLE001 - una migración rota no debe impedir usar la CLI
+        log.failure(log.get("start"), "la migración de datos falló", exc)
+        report = {"moved": [], "failed": [str(exc)]}
+    for path in report["moved"]:
+        log.get("start").info("migrado a la carpeta de datos: %s", path)
+    for failure in report["failed"]:
+        log.get("start").warning("no se pudo migrar: %s", failure)
+    log.session_header()
     try:
         main()
     except requests.RequestException as exc:
         print("No pude conectar con YouTube Music (¿sin internet?). "
               "Inténtalo de nuevo cuando vuelva la conexión.", file=sys.stderr)
         print(f"  Detalle: {type(exc).__name__}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        print("\nCancelado.", file=sys.stderr)
+        raise SystemExit(130) from None
+    except Exception as exc:  # noqa: BLE001 - la CLI no debe terminar con una traza críptica
+        log.failure(log.get("cli"), "fallo no controlado", exc)
+        print(f"Error: {friendly(exc)}", file=sys.stderr)
+        print(f"  Detalle completo en: {config.LOG_PATH}", file=sys.stderr)
         raise SystemExit(1) from None
 
 

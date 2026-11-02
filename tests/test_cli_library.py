@@ -1,4 +1,3 @@
-from pathlib import Path
 
 import pytest
 
@@ -16,36 +15,6 @@ def add(tmp_path, video_id, title, artist="Artista", **extra):
 def run(argv, capsys):
     cli.main(argv)
     return capsys.readouterr().out
-
-
-def test_playlist_flow_by_text_and_id(tmp_path, capsys):
-    add(tmp_path, "id1", "Imagine", "John Lennon")
-    add(tmp_path, "id2", "Yesterday", "Beatles")
-
-    assert "creada" in run(["playlist", "crear", "Favoritas"], capsys)
-    assert "2 añadidas" in run(["playlist", "agregar", "Favoritas", "imagine", "id2"], capsys)
-    shown = run(["playlist", "ver", "Favoritas"], capsys)
-    assert "1. John Lennon - Imagine" in shown and "2. Beatles - Yesterday" in shown
-    assert "Favoritas  (2 canciones)" in run(["playlist", "ver"], capsys)
-    assert "1 quitadas" in run(["playlist", "quitar", "Favoritas", "id1"], capsys)
-    assert "borrada" in run(["playlist", "borrar", "Favoritas"], capsys)
-
-
-def test_ambiguous_or_unknown_song_is_reported_not_added(tmp_path, capsys):
-    add(tmp_path, "a1", "Amor 1")
-    add(tmp_path, "a2", "Amor 2")
-    run(["playlist", "crear", "L"], capsys)
-
-    out = run(["playlist", "agregar", "L", "amor", "nada"], capsys)
-
-    assert "coincide con 2 canciones" in out and "a1" in out
-    assert "no encontré 'nada'" in out and "0 añadidas" in out
-
-
-def test_playlist_errors_exit_with_a_message(capsys):
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["playlist", "ver", "inexistente"])
-    assert "no existe la playlist" in str(exc.value)
 
 
 def test_historial_and_top(capsys):

@@ -11,7 +11,6 @@ clave empieza a sonar casi al instante (condición para un paso sin hueco).
 import math
 import time
 from datetime import timedelta
-from pathlib import Path
 
 from winrt.windows.foundation import Uri
 from winrt.windows.media.core import MediaSource
