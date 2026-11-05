@@ -4,12 +4,16 @@ Se usa el cliente «android» de YouTube a través de yt-dlp: no impone la esper
 web/TV ni necesita ejecutar JavaScript, y su URL (formato 18, MP4 con audio AAC) se puede reproducir
 directamente. Resolver cuesta ~1,5 s, así que se hace por adelantado y se guarda en memoria.
 """
+import json
 import threading
 import time
 import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 
 import yt_dlp
+
+from .config import DATA_DIR
 
 _OPTS = {
     "quiet": True,
@@ -22,6 +26,34 @@ _cache: dict[str, tuple[str, float]] = {}
 _pending: dict[str, Future] = {}
 _local = threading.local()
 _lock = threading.Lock()
+_CACHE_FILE = Path(DATA_DIR) / "stream_cache.json"
+
+
+def _load_cache() -> None:
+    global _cache
+    try:
+        with open(_CACHE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        now = time.time()
+        for vid, entry in (data or {}).items():
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                url, exp = entry
+                if isinstance(url, str) and isinstance(exp, (int, float)) and exp > now:
+                    _cache[vid] = (url, float(exp))
+    except Exception:  # noqa: BLE001 - caché opcional
+        pass
+
+
+def _save_cache() -> None:
+    try:
+        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_cache, f)
+    except Exception:  # noqa: BLE001 - caché opcional
+        pass
+
+
+_load_cache()
 # Dos grupos de hilos: lo que se va a reproducir ya no espera detrás de las resoluciones por adelantado.
 _now = ThreadPoolExecutor(2, thread_name_prefix="stream-now")
 _ahead = ThreadPoolExecutor(3, thread_name_prefix="stream-ahead")
@@ -52,12 +84,28 @@ def _extract(video_id: str) -> str:
         raise
     url = info["url"]
     _cache[video_id] = (url, _expiry(url))
+    _save_cache()
     return url
 
 
 def resolve(video_id: str) -> str:
     """URL de streaming ahora mismo (bloquea ~1,5 s si no estaba resuelta). Lanza si falla."""
-    return cached(video_id) or _now.submit(_extract, video_id).result()
+    if url := cached(video_id):
+        return url
+    from . import downloader
+
+    if not downloader.is_online():
+        raise ConnectionError("sin conexión")
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            return _now.submit(_extract, video_id).result()
+        except Exception as exc:  # noqa: BLE001 - se reintenta ante cortes transitorios
+            last = exc
+            if attempt < 2:
+                time.sleep(1 + attempt)
+    assert last is not None
+    raise last
 
 
 def resolve_ahead(video_id: str) -> Future | None:

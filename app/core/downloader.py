@@ -29,6 +29,7 @@ _BASE_OPTS = {
     "noprogress": True,  # el avance se reporta por on_progress, no por consola
     "noplaylist": True,
     "retries": 5,
+    "continue_dl": True,
     "js_runtimes": {"node": {}},  # YouTube exige un runtime JS para resolver los enlaces
 }
 _COOKIES_LOCK = threading.Lock()
@@ -207,6 +208,29 @@ def _move_to_genre(path: Path, track: dict, genre: str, music_dir: Path) -> Path
     return target
 
 
+def _audio_ok(path: Path, track: dict) -> bool:
+    """Comprueba que un archivo ya descargado se puede leer y no está truncado."""
+    try:
+        from mutagen.mp4 import MP4
+
+        audio = MP4(path)
+        length = float(audio.info.length or 0)
+    except Exception:  # noqa: BLE001 - cualquier fallo de lectura = corrupto
+        return False
+    expected = track.get("duration")
+    if not expected:
+        return True
+    try:
+        expected = float(expected)
+    except (TypeError, ValueError):
+        return True
+    if length <= 0:
+        return False
+    if abs(length - expected) > max(DURATION_SLACK_S, expected * DURATION_SLACK_PCT):
+        return False
+    return True
+
+
 def download_track(
     track: dict,
     genre: str | None = None,
@@ -220,6 +244,13 @@ def download_track(
     """
     music_dir = Path(music_dir or MUSIC_DIR)
     existing = library.get_path(track["video_id"])
+    if existing and not _audio_ok(existing, track):
+        try:
+            existing.unlink(missing_ok=True)
+        except OSError:
+            pass
+        library.remove_track(track["video_id"])
+        existing = None
     if existing:
         return existing
 

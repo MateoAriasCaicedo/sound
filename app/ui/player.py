@@ -194,13 +194,13 @@ class Player:
             self._cur.session().position = timedelta(milliseconds=int(ms))
 
     def position(self) -> int:
-        if not self.loaded:
+        if not self.loaded or self._cur is None:
             return 0
         self._refresh_length()
         return int(self._cur.session().position.total_seconds() * 1000)
 
     def finished(self) -> bool:
-        return self.loaded and self._cur.ended
+        return bool(self.loaded and self._cur is not None and self._cur.ended)
 
     def set_volume(self, pct: float) -> None:
         self._volume = max(0.0, min(1.0, float(pct) / 100))

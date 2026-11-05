@@ -43,6 +43,8 @@ class PlayQueue:
 
     def skip_remote(self, pos: int, step: int) -> int:
         """Sin internet se saltan las canciones que solo existen en YT Music."""
+        if step == 0:
+            return pos
         while 0 <= pos < len(self.order) and not self._is_online() \
                 and self._is_remote(self.ctx[self.order[pos]]):
             pos += step
@@ -63,7 +65,7 @@ class PlayQueue:
 
     def peek_next(self, current: dict | None) -> dict | None:
         """La canción que avanzar elegiría ahora, sin cambiar nada."""
-        if self.repeat == 2 and current:
+        if self.repeat == 2 and current and (self._is_online() or not self._is_remote(current)):
             return current
         if self.up_next:
             return self.up_next[0]
@@ -71,7 +73,9 @@ class PlayQueue:
         if not 0 <= pos < len(self.order):
             if not (self.order and self.repeat >= 1):
                 return None
-            pos = 0
+            pos = self.skip_remote(0, 1)
+            if not 0 <= pos < len(self.order):
+                return None
         return self.ctx[self.order[pos]]
 
     def playable_ahead(self) -> int:

@@ -12,12 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from ..core import config, duplicates, favorites, health, history, library, loudness, media, waveform
+from ..core import config, duplicates, favorites, health, history, library, loudness, waveform
 from ..core import log as _log
 from ..core.filters import fold
 from . import prefs, session
 from .anim import Animator, ease_in_out
 from .downloads import DownloadsController
+from .library_ui import LibraryMixin
+from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
 from .playqueue import PlayQueue
 from .theme import (
@@ -53,12 +55,8 @@ FONT = (FONT_FAMILY, 10)
 SIDE_W = 200  # ancho de la barra de géneros, en píxeles a 96 ppp
 DRAWER_W = 340  # ancho del panel «A continuación»
 XFADE_CHOICES = (0, 2000, 4000, 6000, 8000, 12000)  # ms; 0 = gapless
-FADE_TICK_MS = 40          # resolución de los fundidos y del disparo de la mezcla
 MANUAL_FADE_MS = 280       # fundido al saltar de canción a mano
 INTRO_FADE_MS = 150        # entrada al empezar desde silencio
-PREPARE_WINDOW_MS = 12_000  # cuánto antes del final se deja abierta la siguiente
-LEAD_MS = 60               # la mezcla arranca un poco antes: abrir/arrancar tarda unos ms
-GAPLESS_LEAD_MS = 100
 TRANSITION_TIMEOUT_S = 25
 NET_POLL_S = 6  # cada cuánto se comprueba si hay internet
 STALL_S = 8      # segundos sin avanzar (sin internet) antes de saltar a la cola de respaldo
@@ -66,11 +64,6 @@ BACKUP_AFTER_MS = 10_000  # una canción en streaming se guarda tras escucharla 
 AHEAD_RESULTS = 12  # resultados de YT Music cuya URL se resuelve y se deja abierta en el reproductor
 COLS = (("title", "Título", 280), ("artist", "Artista", 170), ("album", "Álbum", 170),
         ("dur", "Dur.", 50), ("state", "", 84))
-
-
-def fmt(sec) -> str:
-    sec = int(sec or 0)
-    return f"{sec // 60}:{sec % 60:02d}"
 
 
 def load_library() -> list[dict]:
@@ -84,7 +77,7 @@ def _sort_key(col: str):
     return lambda t: (t.get(col) or "").lower()
 
 
-class App(tk.Tk):
+class App(tk.Tk, LibraryMixin, PlaybackMixin):
     def __init__(self) -> None:
         super().__init__()
         self.pq = PlayQueue(self._is_remote, lambda: self.online)
@@ -99,6 +92,7 @@ class App(tk.Tk):
         # hilos fijos para reproducir: conservan su yt-dlp ya preparado y no esperan tras las precargas
         self.play_pool = ThreadPoolExecutor(2)
         self.library: list[dict] = []
+        self._library_cleaned = False
         self.lib_by_id: dict[str, dict] = {}
         self.raw: list[dict] = []   # filas sin ordenar
         self.rows: list[dict] = []  # lo que muestra la tabla ahora
@@ -158,6 +152,7 @@ class App(tk.Tk):
         self.cur_track: dict | None = None
         self.transitioning_since: float | None = None  # se pidió otra canción y aún no suena
         self.auto_fired: str | None = None     # canción cuya mezcla anticipada ya se lanzó
+        self._stream_retries: dict[str, int] = {}  # reintentos de streaming por canción
         self.last_pos = (0, time.monotonic())
         self.resume_track: dict | None = None  # sesión anterior: suena al pulsar play
         self.resume_position = 0
@@ -541,15 +536,6 @@ class App(tk.Tk):
         self.anim.tween("window", 200, lambda q: self.attributes("-alpha", 0.82 + 0.18 * q))
 
     # ---------- vista unificada: biblioteca + YT Music ----------
-    def _reload_library(self) -> None:
-        self.library = load_library()
-        self.lib_by_id = {t["video_id"]: t for t in self.library}
-        self.liked = favorites.liked_ids()
-
-    def refresh_library(self) -> None:
-        self._reload_library()
-        self._build_sidebar()
-        self.refresh_view()
 
     def _build_sidebar(self) -> None:
         counts: dict[str, int] = {}
@@ -1714,6 +1700,7 @@ class App(tk.Tk):
         self.transitioning_since = time.monotonic()
         self.cur_track = t
         old, self.playing_vid = self.playing_vid, vid
+        self._stream_retries.pop(vid, None)
         self.pq.played.add(vid)
         self.last_pos = (0, time.monotonic())
         self._listen_s = 0.0
@@ -1899,7 +1886,7 @@ class App(tk.Tk):
         how = "auto" if auto else "manual"
         if auto and self.pq.repeat == 2 and self.playing_vid:
             cur = self.pq.current(self.playing_vid)
-            if cur:
+            if cur and (self.online or not self._is_remote(cur)):
                 self._play_track(cur, how)
                 return
         if d > 0 and self.pq.up_next:
@@ -1912,108 +1899,21 @@ class App(tk.Tk):
         if not self.pq.order or not 0 <= npos < len(self.pq.order):
             if self.pq.order and self.pq.repeat >= 1:
                 npos %= len(self.pq.order)
+                npos = self.pq.skip_remote(npos, 1 if d > 0 else -1)
             else:
                 if auto:  # fin de la lista
                     self.player.stop()
                     self.btn_play.configure(text="▶")
                 return
+        if not self.pq.order or not 0 <= npos < len(self.pq.order):
+            if auto:
+                self.player.stop()
+                self.btn_play.configure(text="▶")
+            return
         self.pq.opos = npos
         self._play_track(self.pq.ctx[self.pq.order[npos]], how)
 
     # ---------- transiciones ----------
-    def _peek_next(self) -> dict | None:
-        """La canción que `step(1)` elegiría ahora, sin cambiar nada."""
-        return self.pq.peek_next(self.cur_track)
-
-    def _xfade_for(self, cur: dict | None, nxt: dict) -> int:
-        """Duración del crossfade entre dos canciones. 0 = paso sin hueco (gapless)."""
-        x = self.xfade_ms
-        if x <= 0 or cur is None:
-            return 0
-        if cur.get("album") and cur.get("album") == nxt.get("album"):
-            return 0  # pistas del mismo álbum: suelen enlazar entre sí, no se pisan
-        for ms in (self.player.length, (nxt.get("duration") or 0) * 1000):
-            if ms:
-                x = min(x, int(ms * 0.3))  # una canción corta no se pierde en la mezcla
-        return max(x, 0)
-
-    def _ensure_ready(self, t: dict) -> bool:
-        """Deja la siguiente abierta en el reproductor para que arranque sin demora."""
-        vid = t["video_id"]
-        if self.player.is_prepared(vid):
-            return True
-        local = t.get("path") or (self.lib_by_id.get(vid) or {}).get("path")
-        try:
-            if local and Path(local).exists():
-                self.player.prepare_path(vid, local)
-                return True
-            from ..core import streaming
-            url = streaming.cached(vid)
-            if url:
-                self.player.prepare(vid, url)
-                return True
-        except Exception as exc:  # noqa: BLE001 - sin preparar, la transición simplemente no se anticipa
-            _log.failure(log, f"no se pudo dejar lista {vid}", exc)
-            return False
-        self._resolve_ahead([vid])
-        return False
-
-    def _track_truncated(self, actual_ms: int) -> bool:
-        """¿La canción local que suena dura mucho menos de lo anunciado? Los streams no se juzgan."""
-        if self.stream_t is not None or self.cur_track is None:
-            return False
-        return media.is_truncated(self.cur_track.get("duration"), actual_ms)
-
-    def _stop_damaged(self, actual_ms: int) -> None:
-        """Detiene una canción incompleta en vez de encadenar saltos a la siguiente."""
-        t = self.cur_track or {}
-        vid = t.get("video_id")
-        expected = t.get("duration") or 0
-        local = (t.get("path") or (self.lib_by_id.get(vid) or {}).get("path")) if vid else None
-        log.warning("audio incompleto: %s (%s) dura %s de %s s%s; se detiene para no saltar",
-                    t.get("title"), vid, fmt(actual_ms / 1000), fmt(expected),
-                    f" — {local}" if local else "")
-        self.player.stop()
-        self.transitioning_since = None
-        self.auto_fired = None
-        self.btn_play.configure(text="▶")
-        if vid:
-            self._set_state(vid, "✗")  # la fila queda marcada hasta que se vuelva a descargar
-        self.status.configure(
-            text=f"Archivo incompleto: «{t.get('title', vid)}» "
-                 f"({fmt(actual_ms / 1000)} de {fmt(expected)}). Vuelve a descargarla.")
-
-    def _fade_tick(self) -> None:
-        """Cada ~40 ms: mueve los fundidos y lanza la mezcla cuando toca (antes del final real)."""
-        try:
-            self.player.update_fades()
-            self._maybe_transition()
-        finally:
-            self.after(FADE_TICK_MS, self._fade_tick)
-
-    def _maybe_transition(self) -> None:
-        p = self.player
-        if not p.loaded or p.paused or self.seeking:
-            return
-        if self.transitioning_since is not None or self.auto_fired == self.playing_vid:
-            return
-        pos = p.position()  # también lee la duración
-        if not p.length:
-            return
-        rem = p.length - pos
-        if rem > PREPARE_WINDOW_MS:
-            return
-        if self._track_truncated(p.length):
-            self._stop_damaged(p.length)
-            return
-        nxt = self._peek_next()
-        if nxt is None:
-            return
-        ready = self._ensure_ready(nxt)
-        x = self._xfade_for(self.cur_track, nxt)
-        if ready and rem <= max(x, 0) + (LEAD_MS if x else GAPLESS_LEAD_MS):
-            self.auto_fired = self.playing_vid
-            self.step(1, auto=True)
 
     def cycle_xfade(self) -> None:
         i = XFADE_CHOICES.index(self.xfade_ms) if self.xfade_ms in XFADE_CHOICES else 0
@@ -2055,7 +1955,7 @@ class App(tk.Tk):
                 if self.player.finished():
                     since = self.transitioning_since
                     if since is None or time.monotonic() - since > TRANSITION_TIMEOUT_S:
-                        actual = self.player.position()
+                        actual = self.player.length or self.player.position()
                         if self._track_truncated(actual):
                             self._stop_damaged(actual)
                         else:
@@ -2098,8 +1998,16 @@ class App(tk.Tk):
                 if t and t["video_id"] == self.playing_vid and not self._check_online():
                     self.status.configure(text="Sin conexión: pasando a la cola de respaldo")
                     self.step(1, auto=True)
-                elif t and t["video_id"] == self.playing_vid:  # falló el streaming: vía lenta de reserva
-                    self._download_and_play(t, self.play_token)
+                elif t and t["video_id"] == self.playing_vid:  # falló el streaming: reintenta y, si persiste, vía lenta
+                    vid = t["video_id"]
+                    if self._stream_retries.get(vid, 0) < 2 and self._check_online():
+                        self._stream_retries[vid] = self._stream_retries.get(vid, 0) + 1
+                        self.transitioning_since = time.monotonic()
+                        self.status.configure(text="Reintentando streaming…")
+                        self.play_pool.submit(self._resolve_and_play, t, self.play_token)
+                    else:
+                        self._stream_retries.pop(vid, None)
+                        self._download_and_play(t, self.play_token)
                 else:
                     self.btn_play.configure(text="▶")
                     self.status.configure(text=f"No se pudo reproducir: {exc}")
@@ -2109,16 +2017,28 @@ class App(tk.Tk):
     def _load_cover(self, t: dict, path: str | None, token: int) -> None:
         def work() -> None:
             data = None
+            vid = t["video_id"]
+            from pathlib import Path as _P
+            cache_dir = _P(config.DATA_DIR) / "cache" / "covers"
+            cache_file = cache_dir / f"{vid}.bin"
             try:
                 if path:
                     from mutagen.mp4 import MP4
                     covr = (MP4(path).tags or {}).get("covr")
                     data = bytes(covr[0]) if covr else None
+                    if data and not cache_file.exists():
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+                        cache_file.write_bytes(data)
+                elif cache_file.exists():
+                    data = cache_file.read_bytes() or None
                 elif t.get("cover"):
                     with urllib.request.urlopen(t["cover"], timeout=10) as resp:
                         data = resp.read()
+                    if data:
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+                        cache_file.write_bytes(data)
             except Exception as exc:  # noqa: BLE001 - sin portada no pasa nada
-                _log.failure(log, f"sin portada para {t['video_id']}", exc)
+                _log.failure(log, f"sin portada para {vid}", exc)
                 data = None
             self.q.put(("cover", token, data))
 
