@@ -10,7 +10,9 @@ Los avisos salen por `on_event(tipo, canción, **datos)` desde los hilos de desc
     offline                       sin internet: espera a que vuelva
     done      path
     failed    error
-    low_disk  free                poco espacio: la cola se pausa (canción = None)
+    disk_low  free                poco espacio: se descarga de una en una (canción = None)
+    low_disk  free                espacio crítico: la cola se pausa (canción = None)
+    disk_ok   free                se recuperó el espacio (canción = None)
     paused / resumed              el usuario pausó o reanudó las descargas (canción = None)
     outdated  count               varias descargas seguidas fallan como si yt-dlp estuviera
                                   desactualizado: conviene actualizar (canción = None)
@@ -87,8 +89,11 @@ class DownloadService:
         self._wake = threading.Event()
         self._paused = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._supervisor: threading.Thread | None = None
         self._lock = None
-        self._low_disk_reported = False
+        self._disk_lock = threading.Lock()
+        self._disk_slot = threading.Lock()  # con poco espacio solo un trabajador descarga
+        self._disk_level = "ok"
         self._outdated_streak = 0
         self._cookies_reported = False
         self._streak_lock = threading.Lock()
@@ -102,17 +107,50 @@ class DownloadService:
             # Nadie más está descargando, así que lo que quedó 'running' es de una sesión caída.
             library.recover_running()
         for i in range(self.workers):
-            thread = threading.Thread(target=self._worker, name=f"descarga-{i}", daemon=True)
-            thread.start()
-            self._threads.append(thread)
+            self._spawn_worker(i)
+        if self.persistent:
+            # Si un trabajador muere por algo imprevisto, se repone: la cola no se queda muda.
+            self._supervisor = threading.Thread(
+                target=self._supervise, name="descarga-supervisor", daemon=True)
+            self._supervisor.start()
+
+    def _spawn_worker(self, index: int) -> None:
+        thread = threading.Thread(target=self._worker, name=f"descarga-{index}", daemon=True)
+        thread.start()
+        self._threads.append(thread)
+
+    def _supervise(self) -> None:
+        while not self._stop.wait(5):
+            alive = [thread for thread in self._threads if thread.is_alive()]
+            self._threads = alive
+            while len(self._threads) < self.workers:
+                self._spawn_worker(len(self._threads))
 
     def stop(self) -> None:
         """Pide parar: cada trabajador termina su canción actual y sale."""
         self._stop.set()
         self._wake.set()
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
+        """Para y espera a los trabajadores antes de soltar el bloqueo entre procesos.
+
+        Si alguno sigue dentro de una descarga, se deja el lock tomado: el sistema lo liberará al
+        terminar el proceso. Soltarlo antes permitiría que otra instancia recuperase canciones
+        que este proceso todavía está escribiendo.
+        """
         self.stop()
+        deadline = time.monotonic() + max(0.0, timeout)
+        threads = list(self._threads)
+        if self._supervisor is not None:
+            threads.append(self._supervisor)
+        for thread in threads:
+            if thread is threading.current_thread():
+                continue
+            thread.join(max(0.0, deadline - time.monotonic()))
+        alive = [thread for thread in threads if thread.is_alive()]
+        if alive:
+            log.warning("quedan %d hilos de descarga vivos; se conserva el bloqueo", len(alive))
+            return
         if self._lock is not None:
             _unlock(self._lock)
             self._lock = None
@@ -127,7 +165,6 @@ class DownloadService:
     def submit(self, tracks: list[dict], genre: str | None, priority: int = 0) -> int:
         """Encola canciones y despierta a los trabajadores. Devuelve cuántas eran nuevas."""
         added = library.enqueue(tracks, genre, priority)
-        self._low_disk_reported = False
         self._wake.set()
         return added
 
@@ -150,8 +187,7 @@ class DownloadService:
             self._emit("resumed")
 
     def wake(self) -> None:
-        """Avisa a los trabajadores de que la cola cambió (y vuelve a avisar si falta espacio)."""
-        self._low_disk_reported = False
+        """Avisa a los trabajadores de que la cola cambió o de que deben revisar el espacio."""
         self._wake.set()
 
     def retry_failed(self) -> int:
@@ -182,6 +218,15 @@ class DownloadService:
         path = library.get_path(video_id)
         if path:
             return path
+        try:
+            level = downloader.disk_level()
+        except OSError:
+            level = "ok"  # si no se puede consultar el disco, no se bloquea la reproducción
+        if level == "critical":
+            raise OSError(
+                "no hay espacio suficiente en disco para descargar esta canción; "
+                "libera espacio y vuelve a intentarlo"
+            )
         if library.claim(track, genre):
             return self._run(track, genre, offline_wait=0)
 
@@ -226,33 +271,71 @@ class DownloadService:
         self._wake.wait(seconds)
         self._wake.clear()
 
+    @staticmethod
+    def _has_work() -> bool:
+        counts = library.queue_counts()
+        return bool(counts.get("pending") or counts.get("running"))
+
+    def _disk_state(self, free: int) -> str:
+        """Actualiza el estado del disco y avisa solo cuando cambia.
+
+        Sin canciones en cola no se molesta al usuario: el aviso aparece cuando hay algo que
+        limitar. Al liberar espacio, la histéresis de `downloader.disk_level` evita parpadeos.
+        """
+        with self._disk_lock:
+            level = downloader.disk_level(free, self._disk_level)
+            if level != "ok" and not self._has_work():
+                level = "ok"
+            if level == self._disk_level:
+                return level
+            previous, self._disk_level = self._disk_level, level
+        if level == "critical":
+            self._emit("low_disk", None, free=free)
+        elif level == "low":
+            self._emit("disk_low", None, free=free)
+        elif previous != "ok":
+            self._emit("disk_ok", None, free=free)
+        return level
+
     def _worker(self) -> None:
         while not self._stop.is_set():
-            if self._paused.is_set():
-                self._sleep_or_wake(IDLE_POLL)
-                continue
-            if downloader.free_bytes() < downloader.MIN_FREE_BYTES:
-                if not self.persistent:
-                    return  # lo pendiente queda para reanudar cuando haya espacio
-                if not self._low_disk_reported:
-                    self._low_disk_reported = True
-                    self._emit("low_disk", None, free=downloader.free_bytes())
-                self._sleep_or_wake(LOW_DISK_POLL)
-                continue
-            row = library.claim_next()
-            if row is None:
-                if not self.persistent:
-                    return
-                self._sleep_or_wake(IDLE_POLL)
-                continue
-            if self._paused.is_set():  # se pausó justo mientras la reclamaba: no llegó a empezar
-                library.unclaim(row["video_id"])
-                continue
-            track = {key: row[key] for key in library.QUEUE_FIELDS}
             try:
-                self._run(track, row["genre"])
-            except Exception:  # noqa: BLE001, S110 - _run ya lo anotó en la cola y avisó con 'failed'
-                pass
+                if self._paused.is_set():
+                    self._sleep_or_wake(IDLE_POLL)
+                    continue
+                free = downloader.free_bytes()
+                level = self._disk_state(free)
+                if level == "critical":
+                    if not self.persistent:
+                        return  # lo pendiente queda para reanudar cuando haya espacio
+                    self._sleep_or_wake(LOW_DISK_POLL)
+                    continue
+                limited = level == "low"
+                if limited and not self._disk_slot.acquire(blocking=False):
+                    self._sleep_or_wake(IDLE_POLL)
+                    continue
+                try:
+                    row = library.claim_next()
+                    if row is None:
+                        if not self.persistent:
+                            return
+                        self._sleep_or_wake(IDLE_POLL)
+                        continue
+                    if self._paused.is_set():  # se pausó justo mientras la reclamaba
+                        library.unclaim(row["video_id"])
+                        continue
+                    track = {key: row[key] for key in library.QUEUE_FIELDS}
+                    try:
+                        self._run(track, row["genre"])
+                    except Exception:  # noqa: BLE001, S110 - _run ya lo anotó y avisó
+                        pass
+                finally:
+                    if limited:
+                        self._disk_slot.release()
+                        self._wake.set()  # otro trabajador puede ocupar el turno
+            except Exception:  # noqa: BLE001 - un fallo de disco/SQLite no debe matar el hilo
+                log.exception("trabajador de descarga: error inesperado")
+                self._sleep_or_wake(1)
 
     def _run(self, track: dict, genre: str | None, offline_wait: float | None = None) -> Path:
         """Descarga con reintentos, avisa por eventos y deja el resultado anotado en la cola."""

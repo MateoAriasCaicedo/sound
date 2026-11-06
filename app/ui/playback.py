@@ -80,32 +80,26 @@ class PlaybackMixin:
         self.auto_fired = None
         self.btn_play.configure(text="▶")
         if vid:
+            self.damaged.add(vid)
             self._set_state(vid, "✗")
             if local:
-                try:
-                    Path(local).unlink(missing_ok=True)
-                except OSError:
-                    pass
-                try:
-                    from ..core import library
-                    library.remove_track(vid)
-                except Exception:  # noqa: BLE001
-                    pass
-                self.lib_by_id.pop(vid, None)
-                iid = self.vid_iid.get(vid)
-                if iid is not None and 0 <= int(iid) < len(self.rows):
-                    self.rows[int(iid)].pop("path", None)
+                _log.get("ui").warning(
+                    "audio incompleto: se conserva %s; no se borra automáticamente", local)
             if self.online and getattr(self.dl, "service", None) is not None:
                 try:
+                    # El archivo se aparta como «dañado» antes de volver a descargarlo: nunca se
+                    # destruye la copia del usuario sin que lo haya pedido.
                     redownload = dict(t)
                     redownload.pop("path", None)
+                    from ..core import library
+                    library.requeue([vid])  # antes de despertar al servicio
                     self.dl.start_download(redownload, quiet=True)
                     self._set_state(vid, "en cola")
                 except Exception:  # noqa: BLE001
                     pass
         self.status.configure(
             text=f"Archivo incompleto: «{t.get('title', vid)}» "
-                 f"({fmt(actual_ms / 1000)} de {fmt(expected)}). Vuelve a descargarla.")
+                 f"({fmt(actual_ms / 1000)} de {fmt(expected)}). Se conserva; puedes redescargarla.")
 
     def _fade_tick(self) -> None:
         """Cada ~40 ms: mueve los fundidos y lanza la mezcla cuando toca (antes del final real)."""

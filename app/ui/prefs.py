@@ -10,7 +10,8 @@ log = _log.get("ui.prefs")
 PATH = Path(UI_PREFS)
 
 
-def load(path: Path = PATH) -> dict:
+def load(path: Path | None = None) -> dict:
+    path = Path(path or PATH)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -21,7 +22,8 @@ def load(path: Path = PATH) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def save(data: dict, path: Path = PATH) -> None:
+def save(data: dict, path: Path | None = None) -> None:
+    path = Path(path or PATH)
     try:
         write_text_atomic(path, json.dumps(data, ensure_ascii=False))
     except OSError:

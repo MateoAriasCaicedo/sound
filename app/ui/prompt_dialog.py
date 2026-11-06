@@ -72,7 +72,7 @@ class PromptPage(Page):
             self.tree.column(key, width=int(width * self.k), anchor="e" if key == "year" else "w",
                              stretch=key != "year")
         self.scroll = ttk.Scrollbar(self.table, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=self.scroll.set)
+        self.tree.configure(yscrollcommand=self._scrolled)
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.scroll.grid(row=0, column=1, sticky="ns")
 
@@ -112,6 +112,13 @@ class PromptPage(Page):
 
     def _resized(self, e) -> None:
         self.status.configure(wraplength=max(int(280 * self.k), e.width - int(48 * self.k)))
+
+    def _scrolled(self, first: str, last: str) -> None:
+        self.scroll.set(first, last)
+        if float(first) <= 0 and float(last) >= 1:
+            self.scroll.grid_remove()
+        else:
+            self.scroll.grid()
 
     # ---------- entrada ----------
     def _count(self) -> int:

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -18,7 +19,8 @@ from .atomic import write_text_atomic
 COMPONENTS = ("yt-dlp", "ytmusicapi")
 OUTDATED_MARKERS = errors.OUTDATED_MARKERS
 PYPI_YTDLP = "https://pypi.org/pypi/yt-dlp/json"
-MIN_FREE_GB = 1.0
+MIN_FREE_GB = 2.0  # coincide con el aviso preventivo de downloader.LOW_FREE_BYTES
+AUTO_UPDATE_INTERVAL_S = 24 * 60 * 60  # comprobar como mucho una vez al día
 
 
 def is_frozen() -> bool:
@@ -104,7 +106,12 @@ def update_ytdlp_vendor(
         with tempfile.TemporaryDirectory(dir=config.DATA_DIR) as tmp:
             wheel_path = Path(tmp) / "yt-dlp.whl"
             wheel_path.write_bytes(payload)
+            root = Path(tmp).resolve()
             with zipfile.ZipFile(wheel_path) as archive:
+                for member in archive.infolist():
+                    target = (root / member.filename).resolve()
+                    if target != root and root not in target.parents:
+                        return None  # zip slip: una entrada intenta salir del temporal
                 archive.extractall(tmp)
             package = Path(tmp) / "yt_dlp"
             if not (package / "__init__.py").exists():
@@ -119,11 +126,81 @@ def update_ytdlp_vendor(
     return version
 
 
-def _clean_vendor(current: Path) -> None:
-    """Borra versiones anteriores, salvo la que acaba de quedar activa."""
+def ytdlp_version() -> str:
+    """Versión de yt-dlp cargada ahora mismo, o cadena vacía si no se puede importar."""
     try:
-        for item in config.VENDOR_DIR.iterdir():
-            if item.is_dir() and item != current:
+        import yt_dlp
+
+        return str(yt_dlp.version.__version__)
+    except Exception:  # noqa: BLE001 - sin yt-dlp la app tampoco puede descargar
+        return ""
+
+
+def version_key(text: str) -> tuple[int, ...]:
+    """Clave numérica para comparar versiones tipo 2026.10.26 (sin depender de packaging)."""
+    return tuple(int(part) for part in re.findall(r"\d+", str(text or "")))
+
+
+def is_newer_version(latest: str | None, current: str | None) -> bool:
+    if not latest:
+        return False
+    if not current:
+        return True
+    try:
+        return version_key(latest) > version_key(current)
+    except (TypeError, ValueError):
+        return False
+
+
+def latest_ytdlp_version(fetch: Callable[..., object] | None = None) -> str | None:
+    """Última versión publicada en PyPI, o None si no se pudo consultar."""
+    import requests
+
+    fetch = fetch or requests.get
+    try:
+        response = fetch(PYPI_YTDLP, timeout=15)
+        response.raise_for_status()
+        version = response.json()["info"]["version"]
+        return str(version) if version else None
+    except Exception:  # noqa: BLE001 - sin red o respuesta rara: se reintenta otro día
+        return None
+
+
+def auto_update_ytdlp(
+    fetch: Callable[..., object] | None = None,
+    frozen: bool | None = None,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    current: str | None = None,
+) -> tuple[bool, str | None]:
+    """Actualiza yt-dlp si hay una versión nueva. Devuelve (se pudo comprobar, versión nueva).
+
+    En la app empaquetada descarga el wheel a `vendor/` y se usará al reiniciar. En desarrollo
+    actualiza con pip. Nunca lanza: si algo falla, la app sigue con lo que tenía.
+    """
+    latest = latest_ytdlp_version(fetch)
+    if latest is None:
+        return False, None
+    current = ytdlp_version() if current is None else current
+    if not is_newer_version(latest, current):
+        return True, None
+    if (is_frozen() if frozen is None else frozen):
+        version = update_ytdlp_vendor(fetch=fetch)
+        return (version is not None), version
+    try:
+        code = run([sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"]).returncode
+    except Exception:  # noqa: BLE001 - pip puede no existir en un entorno raro
+        return False, None
+    return (code == 0), (latest if code == 0 else None)
+
+
+def _clean_vendor(current: Path, keep: int = 2) -> None:
+    """Borra versiones antiguas, conservando la activa y la anterior para poder volver atrás."""
+    try:
+        folders = [item for item in config.VENDOR_DIR.iterdir() if item.is_dir()]
+        folders.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+        keepers = set(folders[: max(1, keep)]) | {current}
+        for item in folders:
+            if item not in keepers:
                 shutil.rmtree(item, ignore_errors=True)
     except OSError:
         pass

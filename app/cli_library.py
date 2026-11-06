@@ -14,6 +14,8 @@ MAX_CANDIDATES = 8
 def add_commands(sub) -> None:
     s = sub.add_parser("historial", help="lo último que escuchaste")
     s.add_argument("-n", type=int, default=20)
+    s.add_argument("--limpiar", action="store_true", help="borrar reproducciones antiguas")
+    s.add_argument("--dias", type=int, default=730, help="con --limpiar: antigüedad a conservar")
     s = sub.add_parser("top", help="lo más escuchado")
     s.add_argument("-n", type=int, default=20)
     s.add_argument("--dias", type=int, help="solo los últimos N días")
@@ -67,6 +69,11 @@ def _local(timestamp: str) -> str:
 
 # ---------- historial ----------
 def _recent(args: argparse.Namespace) -> None:
+    if getattr(args, "limpiar", False):
+        removed = history.prune(args.dias)
+        print(f"{removed} reproducciones antiguas borradas" if removed
+              else "No había reproducciones tan antiguas")
+        return
     rows = history.recent(args.n)
     if not rows:
         print("Todavía no hay reproducciones registradas.")

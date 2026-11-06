@@ -157,6 +157,18 @@ def test_album_lookup_failure_does_not_fail_the_download(ytdl, tmp_path, monkeyp
     assert _rows()[0]["album"] is None
 
 
+def test_unexpected_album_lookup_error_does_not_fail_the_download(ytdl, tmp_path, monkeypatch):
+    def weird(video_id):
+        raise AttributeError("respuesta inesperada de YouTube")
+
+    monkeypatch.setattr(downloader.ytsearch, "song_details", weird)
+
+    path = downloader.download_track(_track(), "salsa", tmp_path)
+
+    assert path.exists()
+    assert _rows()[0]["album"] is None
+
+
 def test_cover_failure_is_recorded_not_fatal(ytdl, tmp_path, monkeypatch):
     def offline(request, timeout=None):
         raise OSError("sin red")
@@ -330,6 +342,20 @@ def test_long_names_stay_under_max_path_even_with_collision(ytdl, tmp_path):
     assert first.exists() and second.exists()
     assert len(str(first)) <= downloader.MAX_PATH
     assert len(str(second)) <= downloader.MAX_PATH
+
+
+def test_invalid_existing_file_is_quarantined_not_deleted(ytdl, tmp_path, make_m4a):
+    old = tmp_path / "por-genero" / "salsa" / "Artista - Titulo.m4a"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(make_m4a(100))  # dura la mitad de lo anunciado
+    library.add_track(_track(), old)
+
+    path = downloader.download_track(_track(), "salsa", tmp_path)
+
+    assert path == old and path.exists()
+    backups = list(tmp_path.rglob("*.damaged-*.m4a"))
+    assert len(backups) == 1
+    assert MP4(backups[0]).info.length == 100  # la copia anterior no se perdió
 
 
 def test_already_downloaded_track_is_not_downloaded_again(ytdl, tmp_path):

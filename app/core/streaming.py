@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yt_dlp
 
+from . import cookies as _cookies
 from .config import DATA_DIR
 
 _OPTS = {
@@ -44,20 +45,26 @@ def _load_cache() -> None:
         pass
 
 
-def _save_cache() -> None:
-    try:
-        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(_cache, f)
-    except Exception:  # noqa: BLE001 - caché opcional
-        pass
+def _store(video_id: str, url: str) -> None:
+    """Guarda una URL, poda las caducadas y escribe de forma atómica (todo bajo el lock)."""
+    with _lock:
+        _cache[video_id] = (url, _expiry(url))
+        now = time.time()
+        for key in [key for key, (_, expiry) in _cache.items() if expiry <= now]:
+            _cache.pop(key, None)
+        try:
+            from .atomic import write_text_atomic
+
+            _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(_CACHE_FILE, json.dumps(_cache))
+        except Exception:  # noqa: BLE001 - caché opcional
+            pass
 
 
 _load_cache()
 # Dos grupos de hilos: lo que se va a reproducir ya no espera detrás de las resoluciones por adelantado.
 _now = ThreadPoolExecutor(2, thread_name_prefix="stream-now")
 _ahead = ThreadPoolExecutor(3, thread_name_prefix="stream-ahead")
-_WARM_ID = "BSTsnWoslP4"
 
 
 def _expiry(url: str) -> float:
@@ -67,24 +74,33 @@ def _expiry(url: str) -> float:
 
 def cached(video_id: str) -> str | None:
     """URL ya resuelta y todavía válida, o None."""
-    entry = _cache.get(video_id)
-    return entry[0] if entry and entry[1] > time.time() else None
+    with _lock:
+        entry = _cache.get(video_id)
+        return entry[0] if entry and entry[1] > time.time() else None
+
+
+def _get_ydl() -> yt_dlp.YoutubeDL:
+    """Instancia de yt-dlp de este hilo, con el navegador de cookies vigente."""
+    ydl = getattr(_local, "ydl", None)
+    generation = getattr(_local, "generation", None)
+    current_generation = _cookies.generation()
+    if ydl is None or generation != current_generation:
+        ydl = _local.ydl = yt_dlp.YoutubeDL({**_OPTS, **_cookies.ydl_options()})
+        _local.generation = current_generation
+    return ydl
 
 
 def _extract(video_id: str) -> str:
     if url := cached(video_id):
         return url
-    ydl = getattr(_local, "ydl", None)
-    if ydl is None:
-        ydl = _local.ydl = yt_dlp.YoutubeDL(_OPTS)  # una instancia por hilo: ahorra el arranque
+    ydl = _get_ydl()  # una instancia por hilo: ahorra el arranque
     try:
         info = ydl.extract_info(f"https://music.youtube.com/watch?v={video_id}", download=False)
     except Exception:
         _local.ydl = None  # tras un error su estado es dudoso
         raise
     url = info["url"]
-    _cache[video_id] = (url, _expiry(url))
-    _save_cache()
+    _store(video_id, url)
     return url
 
 
@@ -120,11 +136,20 @@ def resolve_ahead(video_id: str) -> Future | None:
     return fut
 
 
+def _prepare_thread() -> None:
+    """Crea la instancia de yt-dlp de este hilo, sin tocar la red."""
+    _get_ydl()
+
+
 def warm_up() -> None:
-    """Crea la instancia de yt-dlp de cada hilo antes de que haga falta."""
+    """Crea la instancia de yt-dlp de cada hilo antes de que haga falta.
+
+    No extrae ningún vídeo: extraer uno de muestra costaba una petición de red en cada arranque
+    y dejaba de funcionar en cuanto ese vídeo cambiaba de formatos.
+    """
     for pool, n in ((_now, 2), (_ahead, 3)):
         for _ in range(n):
-            pool.submit(lambda: _safe(_extract, _WARM_ID))
+            pool.submit(_safe, _prepare_thread)
 
 
 def _safe(fn, *args) -> None:

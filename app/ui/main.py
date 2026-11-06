@@ -12,12 +12,24 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from ..core import config, duplicates, favorites, health, history, library, loudness, waveform
+from ..core import (
+    config,
+    duplicates,
+    favorites,
+    health,
+    history,
+    library,
+    loudness,
+    startup,
+    waveform,
+)
+from ..core import cookies as cookies_store
 from ..core import log as _log
 from ..core.filters import fold
 from . import prefs, session
 from .anim import Animator, ease_in_out
 from .downloads import DownloadsController
+from .events import AHEAD_RESULTS, EventLoopMixin
 from .library_ui import LibraryMixin
 from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
@@ -61,7 +73,8 @@ TRANSITION_TIMEOUT_S = 25
 NET_POLL_S = 6  # cada cuánto se comprueba si hay internet
 STALL_S = 8      # segundos sin avanzar (sin internet) antes de saltar a la cola de respaldo
 BACKUP_AFTER_MS = 10_000  # una canción en streaming se guarda tras escucharla este tiempo
-AHEAD_RESULTS = 12  # resultados de YT Music cuya URL se resuelve y se deja abierta en el reproductor
+AUTO_UPDATE_DELAY_MS = 20_000       # dejar arrancar la ventana antes de buscar actualizaciones
+AUTO_UPDATE_RETRY_MS = 10 * 60_000  # si hay descargas en curso, reintentar más tarde
 COLS = (("title", "Título", 280), ("artist", "Artista", 170), ("album", "Álbum", 170),
         ("dur", "Dur.", 50), ("state", "", 84))
 
@@ -77,7 +90,7 @@ def _sort_key(col: str):
     return lambda t: (t.get(col) or "").lower()
 
 
-class App(tk.Tk, LibraryMixin, PlaybackMixin):
+class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
         self.pq = PlayQueue(self._is_remote, lambda: self.online)
@@ -92,8 +105,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         # hilos fijos para reproducir: conservan su yt-dlp ya preparado y no esperan tras las precargas
         self.play_pool = ThreadPoolExecutor(2)
         self.library: list[dict] = []
-        self._library_cleaned = False
         self.lib_by_id: dict[str, dict] = {}
+        self._search_cache: dict[str, str] = {}  # texto normalizado por canción, para buscar sin repetir
         self.raw: list[dict] = []   # filas sin ordenar
         self.rows: list[dict] = []  # lo que muestra la tabla ahora
         self.vid_iid: dict[str, str] = {}
@@ -125,11 +138,25 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self._ambient: str | None = None  # color de la canción que suena: tiñe la ventana
         self.scheme: dict[str, str] = {}
         self.dl_paused = False
+        self.disk_level = "ok"  # ok | low (una descarga a la vez) | critical (en pausa)
+        self.disk_free: int | None = None
+        self._disk_dialog_shown = False
+        self.damaged: set[str] = set()  # archivos locales incompletos: se conservan y se pueden rehacer
         self.prefs = prefs.load()
-        self.cookies = str(self.prefs.get("cookies") or config.COOKIES_FROM_BROWSER or "")
+        self.cookies = str(self.prefs.get("cookies") or config.COOKIES_FROM_BROWSER or "").strip().lower()
+        # Descargas y streaming comparten el navegador: se aplica antes de resolver nada.
+        cookies_store.configure(self.cookies)
         self._cookies_dialog_shown = False
         self._crash_shown = False
         self.dark = self.prefs.get("dark", system_is_dark())
+        self._last_volume = float(self.prefs.get("vol", 80))
+        self.auto_update = bool(self.prefs.get("auto_update", True))
+        try:
+            self._ytdlp_checked_at = float(self.prefs.get("ytdlp_checked_at", 0) or 0)
+        except (TypeError, ValueError):
+            self._ytdlp_checked_at = 0.0
+        self._auto_update_running = False
+        self.start_with_windows = startup.is_enabled()
         self.pq.shuffle = bool(self.prefs.get("shuffle", False))
         self.pq.repeat = int(self.prefs.get("repeat", 0))
         # cola automática: con internet, canciones similares a la primera; sin él, respaldo local
@@ -177,6 +204,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.bind("<Control-l>", lambda e: (self.toggle_like(), "break")[1])  # Me gusta
         self.bind("<Control-f>", lambda e: (self.search_box.entry.focus_set(), "break")[1])
         self.bind("<Control-a>", self._select_all)  # todas las canciones de la vista
+        self.bind("<Control-comma>", lambda e: (self.open_settings(), "break")[1])  # ajustes
+        self.bind("<F1>", lambda e: (self.open_settings(), "break")[1])  # ayuda y atajos
+        self.bind("<Control-m>", self._toggle_mute)  # silenciar
+        self.bind("<Control-Up>", lambda e: self._volume_step(5))
+        self.bind("<Control-Down>", lambda e: self._volume_step(-5))
         self.bind("<Escape>", self._escape)
         self.play_pool.submit(self._warm_up)
         threading.Thread(target=self._net_loop, daemon=True).start()
@@ -184,6 +216,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.after(100, self._pump)
         self.after(400, self._tick)
         self.after(1200, self._check_environment)
+        self.after(AUTO_UPDATE_DELAY_MS, self._maybe_auto_update)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.anim.tween("window", 260, lambda p: self.attributes("-alpha", p),
                         done=lambda: self.attributes("-alpha", 1.0))
@@ -192,6 +225,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
     def _build(self) -> None:
         k = self.k
         self.anim = Animator(self)
+        if "reduce_motion" in self.prefs:  # preferencia explícita; si no, la del sistema
+            self.anim.reduced = bool(self.prefs["reduce_motion"])
         self.fonts = f = ui_fonts(self)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
@@ -221,7 +256,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         # «Descargas» (la cola de descargas), distinta de la cola de reproducción (btn_queue)
         self.btn_downloads = IconButton(
             top, self.anim, k, "downloads", self.open_queue,
-            tip=lambda: "Descargas (en pausa)" if self.dl_paused else "Descargas")
+            tip=lambda: ("Descargas en pausa" if self.dl_paused else
+                         "Descargas limitadas: poco espacio" if self.disk_level != "ok" else
+                         "Descargas"))
         self.btn_downloads.grid(row=0, column=7, padx=(int(2 * k), 0))
         self.btn_import = IconButton(top, self.anim, k, "link", self.open_import,
                                      tip="Importar álbum, playlist o artista (URL)")
@@ -229,9 +266,15 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.btn_prompt = IconButton(top, self.anim, k, "note", self.open_prompt,
                                      tip="Música por frase (Ctrl+G)")
         self.btn_prompt.grid(row=0, column=6, padx=(int(2 * k), 0))
+        self.btn_more = IconButton(top, self.anim, k, "more", self.open_actions,
+                                   tip="Más acciones de la biblioteca")
+        self.btn_more.grid(row=0, column=8, padx=(int(2 * k), 0))
+        self.btn_settings = IconButton(top, self.anim, k, "settings", self.open_settings,
+                                       tip="Ajustes y atajos (Ctrl+,)")
+        self.btn_settings.grid(row=0, column=9, padx=(int(2 * k), 0))
         self.btn_theme = IconButton(top, self.anim, k, "theme", self.toggle_theme,
                                     tip="Tema claro u oscuro")
-        self.btn_theme.grid(row=0, column=8, padx=(int(2 * k), int(14 * k)))
+        self.btn_theme.grid(row=0, column=10, padx=(int(2 * k), int(14 * k)))
 
         # título de la vista y línea de estado, sobre un degradado teñido por la canción
         self.header = Header(self, self.anim, k, f, list_x)
@@ -351,7 +394,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
 
         right = tk.Frame(bar)
         right.grid(row=0, column=2, sticky="e")
-        self.vol = Slider(right, self.anim, k, command=self.player.set_volume)
+        self.vol = Slider(right, self.anim, k, command=self._on_volume)
         self.vol.pack(side="right")
         self.vol_icon = IconButton(right, self.anim, k, "volume", size=26, glyph=17)
         self.vol_icon.pack(side="right", padx=(int(6 * k), 0))
@@ -370,7 +413,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.time.pack(side="right", padx=(0, int(10 * k)))
 
         self.band_frames = (band, bar, left, mid_bar, right)
-        self.top_icons = (self.btn_import, self.btn_prompt, self.btn_downloads, self.btn_theme)
+        self.top_icons = (self.btn_import, self.btn_prompt, self.btn_downloads,
+                          self.btn_more, self.btn_settings, self.btn_theme)
         self.bar_icons = (self.btn_shuffle, self.btn_prev, self.btn_next, self.btn_repeat,
                           self.vol_icon, self.btn_queue, self.btn_xfade, self.btn_auto)
         self.vol.set(self.prefs.get("vol", 80))
@@ -534,6 +578,17 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.dark = not self.dark
         self.apply_theme()
         self.anim.tween("window", 200, lambda q: self.attributes("-alpha", 0.82 + 0.18 * q))
+        self.save_prefs()
+
+    def toggle_reduce_motion(self) -> None:
+        """Anima o no la ventana; se guarda y se aplica al momento."""
+        self.anim.set_reduced(not self.anim.reduced)
+        self.save_prefs()
+        self.status.configure(text="Animaciones " + (
+            "reducidas" if self.anim.reduced else "activadas"))
+
+    def save_prefs(self) -> None:
+        prefs.save(self._prefs_state())
 
     # ---------- vista unificada: biblioteca + YT Music ----------
 
@@ -625,12 +680,44 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         if len(q) >= 3:  # búsqueda automática en YT Music cuando dejas de escribir
             self._qdebounce = self.after(800, lambda: self.search("songs", auto=True))
 
+    def _rebuild_search_cache(self) -> None:
+        self._search_cache = {
+            t["video_id"]: fold(f"{t['title']} {t['artist']} {t.get('album') or ''}")
+            for t in self.library
+        }
+
+    def _search_text(self, t: dict) -> str:
+        """Texto normalizado de una fila; se memoriza porque la búsqueda corre en cada tecla."""
+        vid = t.get("video_id")
+        if vid and vid in self._search_cache:
+            return self._search_cache[vid]
+        text = fold(f"{t['title']} {t['artist']} {t.get('album') or ''}")
+        if vid:
+            self._search_cache[vid] = text
+        return text
+
+    def _upsert_track(self, track: dict) -> None:
+        """Actualiza una sola canción tras una descarga, sin releer toda la biblioteca."""
+        vid = track["video_id"]
+        previous = self.lib_by_id.get(vid)
+        if previous is None:
+            self.library.append(track)
+        else:
+            for index, item in enumerate(self.library):
+                if item["video_id"] == vid:
+                    self.library[index] = track
+                    break
+        self.lib_by_id[vid] = track
+        self._search_cache[vid] = fold(
+            f"{track['title']} {track['artist']} {track.get('album') or ''}"
+        )
+
     def refresh_view(self) -> None:
         q = self.query.get().strip()
         wanted = fold(q)
 
         def match(t: dict) -> bool:
-            return wanted in fold(f"{t['title']} {t['artist']} {t.get('album') or ''}")
+            return wanted in self._search_text(t)
 
         if self.view_kind == "liked":
             local, remote = favorites.liked_tracks(), []
@@ -802,6 +889,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.genres.off = self.genres._goal = self.genres.yview()[0] * self.genres.total
 
     def _row_state(self, t: dict) -> str:
+        if t["video_id"] in self.damaged:
+            return "✗"
         if self.view_kind in ("recent", "top"):
             plays = t.get("_plays")
             if plays:
@@ -990,6 +1079,53 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def toggle_start_with_windows(self) -> None:
+        """Activa o desactiva que Sound se abra al iniciar sesión en Windows."""
+        wanted = not self.start_with_windows
+        if not startup.set_enabled(wanted):
+            self.status.configure(
+                text="No se pudo cambiar el inicio automático. Revisa los permisos del usuario.")
+            return
+        self.start_with_windows = wanted
+        self.status.configure(text=(
+            "Sound se abrirá al iniciar Windows" if wanted
+            else "Sound ya no se abrirá al iniciar Windows"))
+
+    def toggle_auto_update(self) -> None:
+        """Activa o desactiva la búsqueda diaria de una versión nueva de yt-dlp."""
+        self.auto_update = not self.auto_update
+        self.save_prefs()
+        self.status.configure(text="Actualización automática de yt-dlp " + (
+            "activada" if self.auto_update else "desactivada"))
+        if self.auto_update:
+            self._maybe_auto_update()
+
+    def _maybe_auto_update(self, force: bool = False) -> None:
+        """Busca una versión nueva de yt-dlp sin bloquear la ventana.
+
+        Como mucho una vez al día. En desarrollo espera a que no haya descargas, porque pip
+        reemplaza archivos que un trabajador podría estar importando. Empaquetada descarga a
+        `vendor/`, que no toca lo que ya está en marcha y se usa al reiniciar.
+        """
+        if not self.auto_update or self._auto_update_running:
+            return
+        if not force and time.time() - self._ytdlp_checked_at < health.AUTO_UPDATE_INTERVAL_S:
+            return
+        if not health.is_frozen() and self.dl.queue_left() > 0:
+            self.after(AUTO_UPDATE_RETRY_MS, self._maybe_auto_update)
+            return
+        self._auto_update_running = True
+
+        def work() -> None:
+            try:
+                checked, version = health.auto_update_ytdlp()
+                self.q.put(("auto_update", checked, version, force))
+            except Exception as exc:  # noqa: BLE001 - nunca debe tumbar la ventana
+                _log.failure(log, "la actualización automática de yt-dlp falló", exc)
+                self.q.put(("auto_update", False, None, force))
+
+        threading.Thread(target=work, daemon=True, name="actualizar-ytdlp").start()
+
     def after_tag_edit(self, updated: dict) -> None:
         vid = updated["video_id"]
         self.refresh_library()
@@ -1095,6 +1231,20 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
             self.dl.submit(group, genre)
         self.status.configure(text=f"Descargando {len(picks)}…")
 
+    def redownload_selected(self) -> None:
+        """Rehace archivos marcados como incompletos; la copia anterior se aparta, no se borra."""
+        picks = [t for t in self._selected() if t["video_id"] in self.damaged]
+        if not picks:
+            return
+        for track in picks:
+            redownload = dict(track)
+            redownload.pop("path", None)
+            redownload["_genre"] = self._genre_of(track)
+            library.requeue([track["video_id"]])  # antes de despertar al servicio
+            self.dl.start_download(redownload)
+            self._set_state(track["video_id"], "en cola")
+        self.status.configure(text=f"Reintentando {len(picks)} archivo(s) incompleto(s)")
+
 
 
 
@@ -1103,6 +1253,29 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
     def open_queue(self) -> None:
         """Abre la página de la cola de descargas."""
         self.show_page("downloads")
+
+    def open_settings(self) -> None:
+        """Ajustes de apariencia, reproducción, descargas y atajos."""
+        self.show_page("settings")
+
+    def open_actions(self) -> None:
+        """Menú visible con las acciones que antes solo estaban en el clic derecho."""
+        m = self._menu()
+        m.add_command(label="Ajustes y atajos…", command=self.open_settings)
+        m.add_separator()
+        m.add_command(label="Buscar canciones repetidas…", command=self.find_duplicates)
+        m.add_command(label="Exportar biblioteca a M3U…", command=self.export_m3u)
+        m.add_command(label="Quitar archivos que faltan…", command=self.clean_missing)
+        m.add_checkbutton(label="Normalizar volumen (ReplayGain)",
+                          variable=self.var_normalize, command=self.toggle_normalize)
+        m.add_separator()
+        m.add_command(label="Diagnóstico del entorno…", command=self.open_health)
+        x = self.btn_more.winfo_rootx()
+        y = self.btn_more.winfo_rooty() + self.btn_more.winfo_height()
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
 
     def open_prompt(self) -> None:
         """Abre «Música por frase»: pides lo que quieres oír y cuántas canciones."""
@@ -1116,6 +1289,10 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         """Abre el diagnóstico del entorno (Node, ffmpeg, cookies, carpetas…)."""
         self.show_page("health")
 
+    def open_music_folder(self) -> None:
+        """Abre la carpeta donde se guardan las descargas (útil si falta espacio)."""
+        health.open_path(config.MUSIC_DIR)
+
     def _check_environment(self) -> None:
         """Avisa al arrancar de lo que impedirá descargar, sin bloquear la ventana."""
         try:
@@ -1126,10 +1303,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
             self.status.configure(text=problems[0])
 
     def set_cookies(self, browser: str | None) -> None:
-        """Guarda el navegador de cookies y lo aplica a las próximas descargas."""
-        browser = (browser or "").strip()
-        if browser == self.cookies:
-            return
+        """Guarda el navegador de cookies y lo aplica a descargas y streaming.
+
+        Se aplica aunque sea el mismo navegador: así volver a elegirlo relee las cookies si la
+        sesión se renovó en el navegador.
+        """
+        browser = (browser or "").strip().lower()
         self.cookies = browser
         self.dl.configure_cookies(browser)
         prefs.save(self._prefs_state())
@@ -1175,6 +1354,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         elif name == "health":
             from .health_page import HealthPage
             page = HealthPage(self)
+        elif name == "settings":
+            from .settings_page import SettingsPage
+            page = SettingsPage(self)
         else:
             raise KeyError(name)
         self.pages[name] = page
@@ -1215,14 +1397,18 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         self.tree.focus_set()
 
     def _escape(self, _e=None) -> str | None:
-        if self.active_page is None:
-            return None
-        self.close_page()
-        return "break"
+        if self.active_page is not None:
+            self.close_page()
+            return "break"
+        if self.queue_win is not None:  # el panel «A continuación» también se cierra con Esc
+            self._show_queue()
+            return "break"
+        return None
 
     def _refresh_nav(self) -> None:
         for name, button in (("prompt", self.btn_prompt), ("import", self.btn_import),
-                             ("downloads", self.btn_downloads)):
+                             ("downloads", self.btn_downloads),
+                             ("settings", self.btn_settings)):
             button.set_active(self.active_page is not None and self.active_page is self.pages.get(name))
 
     def retry_failed_downloads(self) -> int:
@@ -1238,13 +1424,23 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
     def _queue_paused_changed(self, paused: bool) -> None:
         # visible aunque la página esté cerrada
         self.dl_paused = paused
-        self.btn_downloads.set_on(paused)
-        self.status.configure(
-            text="Descargas en pausa: lo que ya empezó termina. Reanuda desde «Descargas»." if paused
-            else "Descargas reanudadas")
+        self._refresh_downloads_icon()
+        if paused:
+            message = "Descargas en pausa: lo que ya empezó termina. Reanuda desde «Descargas»."
+        elif self.disk_level == "critical":
+            message = "Descargas en pausa por falta de espacio: libera espacio y se reanudarán solas."
+        elif self.disk_level == "low":
+            message = "Descargas reanudadas: con poco espacio, irán de una en una."
+        else:
+            message = "Descargas reanudadas"
+        self.status.configure(text=message)
         page = self.pages.get("downloads")
         if page is not None and self.active_page is page:
             page.refresh()
+
+    def _refresh_downloads_icon(self) -> None:
+        """Marca el icono de Descargas si el usuario las pausó o si falta espacio."""
+        self.btn_downloads.set_on(self.dl_paused or self.disk_level != "ok")
 
     # ---------- streaming: URLs resueltas y reproductor preparado por adelantado ----------
     @staticmethod
@@ -1332,6 +1528,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
             waveform.forget(t["video_id"])
             try:
                 Path(t["path"]).unlink(missing_ok=True)
+                (Path(config.DATA_DIR) / "cache" / "covers" / f"{t['video_id']}.bin").unlink(
+                    missing_ok=True)
             except OSError:
                 log.warning("no se pudo borrar %s", t["path"], exc_info=True)
             self.dl.state.pop(t["video_id"], None)
@@ -1361,6 +1559,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
                           command=self.toggle_like)
         if any(t["video_id"] not in self.lib_by_id for t in picks):
             m.add_command(label="Descargar", command=self.download_selected)
+        if any(t["video_id"] in self.damaged for t in picks):
+            m.add_command(label="Volver a descargar (archivo incompleto)",
+                          command=self.redownload_selected)
         if len(local) == 1:
             m.add_command(label="Editar etiquetas…", command=self.edit_tags)
         if local:
@@ -1505,6 +1706,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         elif not self.autoplay:
             self.pq.auto_ctx = False
         self._refresh_toggles()
+        self.save_prefs()
         self.status.configure(text="Cola automática " + ("activada" if self.autoplay else "desactivada"))
 
     # ---------- conexión ----------
@@ -1582,7 +1784,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
             header(f"Añadidas por ti · {len(self.pq.up_next)}")
             for i, t in enumerate(self.pq.up_next):
                 add(t, "up", i, right="＋")
-        upcoming = range(self.pq.opos + 1, len(self.pq.order))
+        upcoming = list(range(self.pq.opos + 1, len(self.pq.order)))
         if upcoming:
             header("Siguen automáticamente" if self.pq.auto_ctx else "Siguen en la lista")
             for j in upcoming:
@@ -1593,7 +1795,18 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         lb.sel.clear()
         lb.set_items(items)
         kind = "Cola automática" if self.pq.auto_ctx else "De la lista"
-        self.drawer_sub.configure(text=f"{kind} · {'en línea' if self.online else 'sin conexión'}")
+        queued = list(self.pq.up_next) + [self.pq.ctx[self.pq.order[j]] for j in upcoming]
+        total = sum((t.get("duration") or 0) for t in queued)
+        if queued:
+            if total >= 3600:
+                length = f"{int(total) // 3600} h {int(total) % 3600 // 60} min"
+            else:
+                length = fmt(total)
+            summary = f"{len(queued)} canciones · {length}"
+        else:
+            summary = "nada en cola"
+        self.drawer_sub.configure(
+            text=f"{kind} · {'en línea' if self.online else 'sin conexión'} · {summary}")
 
     def _queue_jump(self, _e=None) -> None:
         sel = self.queue_lb.curselection() if self.queue_lb else ()
@@ -1855,6 +2068,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
 
     def toggle_normalize(self) -> None:
         self.normalize = bool(self.var_normalize.get())
+        self.save_prefs()
         if not self.normalize:
             self.player.set_gain_db(0)
             self.status.configure(text="Normalización de volumen desactivada")
@@ -1865,6 +2079,41 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
                 self.lib_by_id.get(self.cur_track["video_id"]) or {}).get("path")
             if local:
                 self._set_track_gain(self.cur_track, local, current=True)
+
+    def _on_volume(self, value: float) -> None:
+        """Volumen desde el carril: mantiene el icono y el último valor audible al día."""
+        self.player.set_volume(value)
+        if value > 0:
+            self._last_volume = value
+        if hasattr(self, "vol_icon"):
+            self.vol_icon.set_on(value <= 0)
+
+    def set_volume(self, value: float) -> None:
+        """Cambia el volumen desde el teclado o la página de ajustes."""
+        value = max(0.0, min(100.0, float(value)))
+        self.vol.set(value)
+        if value > 0:
+            self._last_volume = value
+        self.save_prefs()
+        self.status.configure(text=f"Volumen: {int(value)}%")
+
+    def _volume_step(self, delta: int) -> str | None:
+        if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):
+            return None  # dentro de un campo, las flechas mueven el cursor
+        self.set_volume(self.vol.get() + delta)
+        return "break"
+
+    def _toggle_mute(self, _e=None) -> str | None:
+        if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):
+            return None
+        if self.vol.get() > 0:
+            self._last_volume = self.vol.get()
+            self.vol.set(0)
+            self.save_prefs()
+            self.status.configure(text="Silenciado (Ctrl+M para recuperar el volumen)")
+        else:
+            self.set_volume(self._last_volume or 80)
+        return "break"
 
     def play_pause(self) -> None:
         if not self.player.loaded:
@@ -1919,6 +2168,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         i = XFADE_CHOICES.index(self.xfade_ms) if self.xfade_ms in XFADE_CHOICES else 0
         self.xfade_ms = XFADE_CHOICES[(i + 1) % len(XFADE_CHOICES)]
         self._refresh_toggles()
+        self.save_prefs()
         self.status.configure(text="Transición: " + (
             f"crossfade de {self.xfade_ms // 1000} s (sin hueco entre pistas del mismo álbum)"
             if self.xfade_ms else "sin crossfade, paso sin hueco (gapless)"))
@@ -1928,10 +2178,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         if self.pq.ctx and self.pq.order:
             self.pq.make_order(self.pq.order[self.pq.opos])
         self._refresh_toggles()
+        self.save_prefs()
 
     def cycle_repeat(self) -> None:
         self.pq.repeat = (self.pq.repeat + 1) % 3
         self._refresh_toggles()
+        self.save_prefs()
 
     def _refresh_toggles(self) -> None:
         self.btn_shuffle.set_on(self.pq.shuffle)
@@ -1946,6 +2198,15 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
             self.player.seek(self.scale.get() / 1000 * self.player.length)
 
     def _tick(self) -> None:
+        """Reprograma siempre: un fallo en un fotograma no debe congelar la reproducción."""
+        try:
+            self._tick_once()
+        except Exception as exc:  # noqa: BLE001 - el bucle de Tk no debe quedarse sin tick
+            _log.failure(log, "el tick de reproducción falló", exc)
+        finally:
+            self.after(400, self._tick)
+
+    def _tick_once(self) -> None:
         now = time.monotonic()
         delta, self._tick_at = now - self._tick_at, now
         if self.player.loaded:
@@ -2011,7 +2272,6 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
                 else:
                     self.btn_play.configure(text="▶")
                     self.status.configure(text=f"No se pudo reproducir: {exc}")
-        self.after(400, self._tick)
 
     # ---------- portada ----------
     def _load_cover(self, t: dict, path: str | None, token: int) -> None:
@@ -2029,14 +2289,16 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
                     if data and not cache_file.exists():
                         cache_dir.mkdir(parents=True, exist_ok=True)
                         cache_file.write_bytes(data)
-                elif cache_file.exists():
+                if not data and cache_file.exists():  # archivo local sin carátula incrustada
                     data = cache_file.read_bytes() or None
-                elif t.get("cover"):
+                if not data and t.get("cover"):  # ni incrustada ni en caché: se pide a YouTube
                     with urllib.request.urlopen(t["cover"], timeout=10) as resp:
-                        data = resp.read()
-                    if data:
+                        data = resp.read(8 * 1024 * 1024 + 1)
+                    if data and len(data) <= 8 * 1024 * 1024:
                         cache_dir.mkdir(parents=True, exist_ok=True)
                         cache_file.write_bytes(data)
+                    else:
+                        data = None
             except Exception as exc:  # noqa: BLE001 - sin portada no pasa nada
                 _log.failure(log, f"sin portada para {vid}", exc)
                 data = None
@@ -2083,129 +2345,17 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin):
         finally:
             self.after(5000, lambda: setattr(self, "_crash_shown", False))
 
-    # ---------- cola de eventos de hilos ----------
-    def _pump(self) -> None:
-        try:
-            while True:
-                ev = self.q.get_nowait()
-                kind = ev[0]
-                if kind == "results":
-                    if ev[1] == self.search_id:
-                        self.searching = False
-                        self.remote, self.remote_src, self.remote_q = ev[2], ev[3], ev[4]
-                        self.refresh_view()
-                        self._fade_rows()
-                        if not self.yt_genres:  # la conexión volvió: carga los géneros
-                            self._load_yt_genres()
-                        # resuelve ya las URLs de los primeros resultados: al dar play, sin espera
-                        self._resolve_ahead(
-                            [t["video_id"] for t in self.rows if self._is_remote(t)][:AHEAD_RESULTS])
-                elif kind == "remote_error":
-                    if ev[1] == self.search_id:
-                        self.searching = False
-                        self.refresh_view()
-                        self.status.configure(
-                            text=f"Sin conexión con YouTube: solo biblioteca  ({ev[2][:60]})")
-                elif kind == "status":
-                    self.status.configure(text=ev[1])
-                elif kind == "genres":
-                    self.yt_failed = ev[1] is None
-                    self.yt_genres = ev[1] or []
-                    self._build_sidebar()
-                elif kind == "stream":
-                    if ev[1] == self.play_token:
-                        if len(ev) > 4:  # URL de streaming
-                            self._start(ev[2], ev[1], url=ev[3], cover=False)
-                        else:  # archivo local (vía de reserva)
-                            self._start(ev[2], ev[1], path=ev[3], cover=False)
-                            self.status.configure(text="Reproduciendo · guardada en tu biblioteca")
-                elif kind == "radio":
-                    self._on_radio(ev[1], ev[2])
-                elif kind == "radio_err":
-                    self._on_radio_error(ev[1], ev[2])
-                elif kind == "online":
-                    self._on_online(ev[1])
-                elif kind == "fallback":
-                    if ev[1] == self.play_token:
-                        self._download_and_play(ev[2], ev[1])
-                elif kind == "resolved":
-                    self._prepare(ev[1])
-                elif kind == "wave":
-                    self.scale.set_levels(ev[1], ev[2])
-                elif kind == "cover":
-                    if ev[1] == self.play_token:
-                        self._set_cover(ev[2])
-                elif kind == "queue_paused":
-                    self._queue_paused_changed(ev[1])
-                elif kind == "needs_cookies":
-                    self.status.configure(text=ev[1])
-                    if not self._cookies_dialog_shown:
-                        self._cookies_dialog_shown = True
-                        messagebox.showinfo(
-                            "YouTube pide iniciar sesión",
-                            "YouTube está pidiendo iniciar sesión o verificar que no eres un "
-                            "bot.\n\nAbre «Descargas» y elige, en «Cookies de YouTube», el "
-                            "navegador donde tengas la sesión de YouTube iniciada. Después "
-                            "pulsa «Reintentar».\n\nEl detalle queda en el registro.",
-                            parent=self)
-                elif kind == "crash":
-                    self._show_crash(ev[1], ev[2])
-                elif kind == "health":
-                    page = self.pages.get("health")
-                    if page is not None:
-                        page.set_checks(ev[1])
-                elif kind == "update_done":
-                    if ev[1] == 0:
-                        self.status.configure(text="Componentes actualizados. Reinicia la ventana "
-                                                    "para usar la versión nueva.")
-                    else:
-                        self.status.configure(
-                            text=f"No se pudo actualizar: {ev[2] or 'falló la descarga'}")
-                elif kind == "gain":
-                    self._gain_pending.discard(ev[1])
-                    if self.normalize and self.playing_vid == ev[1] and ev[2] is not None:
-                        self.player.set_gain_db(ev[2])
-                elif kind == "dl_state":
-                    self._set_state(ev[1], ev[2])
-                elif kind == "dl_progress":
-                    self._set_state(ev[1], f"{ev[2]}%")
-                elif kind in ("downloaded", "dl_error"):
-                    self.dl.inflight.discard(ev[1])
-                    self.dl.quiet.discard(ev[1])
-                    if kind == "downloaded":
-                        self._reload_library()
-                        iid = self.vid_iid.get(ev[1])
-                        if iid is not None and ev[1] in self.lib_by_id:  # la fila pasa a ser local
-                            self.rows[int(iid)]["path"] = self.lib_by_id[ev[1]]["path"]
-                        if ev[1] in self.lib_by_id:  # ya hay audio que medir: su onda crece aquí
-                            self.waves.want(ev[1], self.lib_by_id[ev[1]]["path"],
-                                            urgent=ev[1] == self.playing_vid)
-                        self._set_state(ev[1], "✓")
-                        self._retag(ev[1])
-                        msg = f"Descargada: {ev[2]}"
-                    elif len(ev) > 3 and ev[3]:  # precarga fallida: sin ruido, se reintenta al reproducir
-                        self.dl.state.pop(ev[1], None)
-                        iid = self.vid_iid.get(ev[1])
-                        if iid is not None and self.tree.exists(iid):
-                            self.tree.set(iid, "state", "☁")
-                        continue
-                    else:
-                        self._set_state(ev[1], "✗")
-                        msg = f"Error — {ev[2]}"
-                    if self.dl.queue_left() == 0:
-                        msg += "  ·  listo"
-                        self._build_sidebar()  # actualiza los contadores por género
-                    self.status.configure(text=msg)
-        except queue.Empty:
-            pass
-        self.after(100, self._pump)
-
     # ---------- preferencias ----------
 
     def _prefs_state(self) -> dict:
-        return {"dark": self.dark, "vol": self.vol.get(), "shuffle": self.pq.shuffle,
+        volume = self.vol.get()
+        if volume <= 0 and self._last_volume > 0:
+            volume = self._last_volume  # no guardar un 0 accidental al cerrar silenciado
+        return {"dark": self.dark, "vol": volume, "shuffle": self.pq.shuffle,
                 "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
-                "normalize": self.normalize, "cookies": self.cookies}
+                "normalize": self.normalize, "cookies": self.cookies,
+                "reduce_motion": self.anim.reduced, "auto_update": self.auto_update,
+                "ytdlp_checked_at": self._ytdlp_checked_at}
 
     def _close(self) -> None:
         self._save_session()

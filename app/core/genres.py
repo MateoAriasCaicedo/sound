@@ -74,16 +74,62 @@ def sidebar_genres() -> list[str]:
     return list(SIDEBAR_GENRES)
 
 
-def _all_playlists() -> list[dict]:
-    """Índice de todas las playlists de género de YouTube Music, con caché en disco."""
+def _read_cache() -> dict:
+    """Caché válida (playlists y, si existe, categorías), o {}."""
     try:
         cached = json.loads(GENRE_CACHE.read_text(encoding="utf-8"))
-        if time.time() - cached["saved_at"] < CACHE_TTL:
-            return cached["playlists"]
-    except (OSError, ValueError, KeyError):
-        pass  # sin caché válido: se reconstruye
+    except (OSError, ValueError):
+        return {}
+    saved = cached.get("saved_at") if isinstance(cached, dict) else None
+    if not isinstance(saved, (int, float)) or time.time() - saved >= CACHE_TTL:
+        return {}
+    playlists = cached.get("playlists")
+    if not isinstance(playlists, list) or not all(isinstance(item, dict) for item in playlists):
+        return {}
+    return cached
 
-    categories = ytsearch.genre_categories()
+
+def _write_cache(playlists: list[dict], categories: dict[str, str] | None = None) -> None:
+    try:
+        from .atomic import write_text_atomic
+
+        payload = {"saved_at": time.time(), "playlists": playlists}
+        if categories is not None:
+            payload["categories"] = categories
+        write_text_atomic(GENRE_CACHE, json.dumps(payload, ensure_ascii=False))
+    except OSError:
+        pass  # sin caché se vuelve a consultar la próxima vez; no es un fallo de la app
+
+
+def cached_categories() -> dict[str, str]:
+    """Categorías oficiales guardadas con la última consulta, para seguir sin conexión."""
+    categories = _read_cache().get("categories")
+    return categories if isinstance(categories, dict) else {}
+
+
+def _categories() -> dict[str, str]:
+    """Categorías oficiales: se piden a YouTube y, si no hay red, se usa la caché."""
+    try:
+        return ytsearch.genre_categories()
+    except Exception:  # noqa: BLE001 - la caché permite buscar por género sin conexión
+        cached = cached_categories()
+        if cached:
+            return cached
+        raise
+
+
+def _all_playlists() -> list[dict]:
+    """Índice de todas las playlists de género de YouTube Music, con caché en disco."""
+    cached = _read_cache()
+    if cached:
+        if "categories" not in cached:  # caché de una versión anterior: completar sin perderla
+            try:
+                _write_cache(cached["playlists"], ytsearch.genre_categories())
+            except Exception:  # noqa: BLE001 - sin red se sigue usando lo que ya había
+                pass
+        return cached["playlists"]
+
+    categories = _categories()
 
     def fetch(item: tuple[str, str]) -> list[dict]:
         name, params = item
@@ -92,14 +138,7 @@ def _all_playlists() -> list[dict]:
     with ThreadPoolExecutor(5) as pool:
         found = [p for batch in pool.map(fetch, categories.items()) for p in batch]
     unique = list({p["playlist_id"]: p for p in found}.values())
-    try:
-        from .atomic import write_text_atomic
-
-        write_text_atomic(GENRE_CACHE,
-                          json.dumps({"saved_at": time.time(), "playlists": unique},
-                                     ensure_ascii=False))
-    except OSError:
-        pass  # sin caché se vuelve a consultar la próxima vez; no es un fallo de la app
+    _write_cache(unique, categories)
     return unique
 
 
@@ -111,7 +150,7 @@ def resolve(term: str) -> tuple[str, list[dict]] | None:
         pattern = spec.get("titles")
         playlists = [p for p in _all_playlists() if re.search(pattern, norm(p["title"]))] if pattern else []
         return term, playlists
-    categories = ytsearch.genre_categories()
+    categories = _categories()
     by_name = {norm(name): name for name in categories}
 
     if wanted in by_name:  # género oficial exacto

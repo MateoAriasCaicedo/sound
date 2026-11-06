@@ -49,7 +49,9 @@ jobs:
 
       - name: Zip portable build
         shell: pwsh
-        run: Compress-Archive -Path "dist\Sound\*" -DestinationPath "dist\Sound-windows.zip"
+        run: |
+          $version = (Select-String -Path "app\__init__.py" -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
+          Compress-Archive -Path "dist\Sound\*" -DestinationPath "dist\Sound-$version-windows.zip"
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
@@ -72,7 +74,7 @@ jobs:
         with:
           name: Sound-windows-${{ github.sha }}
           path: |
-            dist/Sound-windows.zip
+            dist/Sound-*-windows.zip
             dist/Sound-*-setup.exe
           if-no-files-found: error
 
@@ -82,5 +84,5 @@ jobs:
         with:
           files: |
             dist/Sound-*-setup.exe
-            dist/Sound-windows.zip
+            dist/Sound-*-windows.zip
           generate_release_notes: true

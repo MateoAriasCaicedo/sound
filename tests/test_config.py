@@ -153,6 +153,39 @@ def test_ensure_node_path_finds_a_bundled_node(tmp_path, monkeypatch):
     assert str(folder) in __import__("os").environ["PATH"]
 
 
+def test_activate_vendor_refuses_a_path_outside_the_vendor_folder(tmp_path, monkeypatch):
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    outside = tmp_path / "fuera"
+    (outside / "yt_dlp").mkdir(parents=True)
+    (outside / "yt_dlp" / "__init__.py").write_text("", encoding="utf-8")
+    (vendor / "current.json").write_text(
+        '{"path": "%s", "version": "9.9.9"}' % str(outside).replace("\\", "\\\\"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "VENDOR_DIR", vendor)
+    monkeypatch.setattr(config, "_is_frozen", lambda: True)
+
+    assert config.activate_vendor() is None
+
+
+def test_activate_vendor_accepts_a_path_inside_the_vendor_folder(tmp_path, monkeypatch):
+    vendor = tmp_path / "vendor"
+    package = vendor / "yt_dlp-9.9.9"
+    (package / "yt_dlp").mkdir(parents=True)
+    (package / "yt_dlp" / "__init__.py").write_text("", encoding="utf-8")
+    (vendor / "current.json").write_text(
+        '{"path": "%s", "version": "9.9.9"}' % str(package).replace("\\", "\\\\"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "VENDOR_DIR", vendor)
+    monkeypatch.setattr(config, "_is_frozen", lambda: True)
+    monkeypatch.setattr(config.sys, "path", list(config.sys.path))
+
+    assert config.activate_vendor() == "9.9.9"
+    assert str(package) in config.sys.path
+
+
 def test_version_matches_pyproject():
     import tomllib
 

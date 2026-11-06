@@ -27,16 +27,22 @@ def record(track: dict, db_path: Path | None = None) -> None:
         )
 
 
-_SELECT = (
-    "SELECT p.video_id, p.title, p.artist, p.played_at AS last_played, MAX(p.id) AS last_id,"
-    " COUNT(*) AS plays, t.path FROM plays p LEFT JOIN tracks t ON t.video_id = p.video_id"
+_FIELDS = (
+    "p.video_id, p.title, p.artist, p.played_at AS last_played, c.last_id, c.plays, t.path"
 )
 
 
 def recent(limit: int = 50, db_path: Path | None = None) -> list[dict]:
     """Lo último escuchado, sin repetir canciones: la más reciente primero."""
+    query = (
+        f"SELECT {_FIELDS} FROM plays p"
+        " JOIN (SELECT video_id, MAX(id) AS last_id, COUNT(*) AS plays"
+        "       FROM plays GROUP BY video_id) c ON p.id = c.last_id"
+        " LEFT JOIN tracks t ON t.video_id = p.video_id"
+        " ORDER BY c.last_id DESC LIMIT ?"
+    )
     with closing(library.connect(db_path)) as conn:
-        rows = conn.execute(f"{_SELECT} GROUP BY p.video_id ORDER BY last_id DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(query, (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -44,13 +50,32 @@ def most_played(limit: int = 20, days: int | None = None, db_path: Path | None =
     """Lo más escuchado, opcionalmente solo de los últimos `days` días. Empata por recencia."""
     where, params = "", []
     if days is not None:
-        where, params = " WHERE p.played_at >= datetime('now', ?)", [f"-{int(days)} days"]
+        where = " WHERE played_at >= datetime('now', ?)"
+        params = [f"-{int(days)} days"]
+    query = (
+        f"SELECT {_FIELDS} FROM plays p"
+        " JOIN (SELECT video_id, MAX(id) AS last_id, COUNT(*) AS plays"
+        f"       FROM plays{where} GROUP BY video_id) c ON p.id = c.last_id"
+        " LEFT JOIN tracks t ON t.video_id = p.video_id"
+        " ORDER BY c.plays DESC, c.last_id DESC LIMIT ?"
+    )
     with closing(library.connect(db_path)) as conn:
-        rows = conn.execute(
-            f"{_SELECT}{where} GROUP BY p.video_id ORDER BY plays DESC, last_id DESC LIMIT ?",
-            (*params, limit),
-        ).fetchall()
+        rows = conn.execute(query, (*params, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def prune(days: int = 730, db_path: Path | None = None) -> int:
+    """Borra reproducciones más antiguas que `days` días. Devuelve cuántas quitó.
+
+    El historial no se poda solo: se ofrece como mantenimiento explícito para no borrar datos
+    del usuario sin avisar.
+    """
+    if days < 0:
+        raise ValueError("los días no pueden ser negativos")
+    with closing(library.connect(db_path)) as conn, conn:
+        return conn.execute(
+            "DELETE FROM plays WHERE played_at < datetime('now', ?)", (f"-{int(days)} days",)
+        ).rowcount
 
 
 def clear(db_path: Path | None = None) -> int:

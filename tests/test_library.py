@@ -77,6 +77,25 @@ def test_database_deleted_while_running_is_prepared_again():
         assert conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0] == 0
 
 
+def test_find_tracks_ignores_accents_and_prefers_exact_video_id(tmp_path):
+    library.add_track({"video_id": "cafe", "title": "Café", "artist": "José"}, tmp_path / "cafe.m4a")
+    library.add_track({"video_id": "otra", "title": "Otra", "artist": "Alguien"}, tmp_path / "otra.m4a")
+
+    assert [t["video_id"] for t in library.find_tracks("cafe")] == ["cafe"]
+    assert [t["video_id"] for t in library.find_tracks("JOSE")] == ["cafe"]
+    assert all(t["video_id"] != "otra" for t in library.find_tracks("cafe"))
+
+
+def test_requeue_puts_a_done_song_back_in_the_queue():
+    track = _track("a")
+    library.add_track(track, Path("a.m4a"))
+    library.enqueue([track], None)
+    library.mark("a", "done", 1)
+
+    assert library.requeue(["a"]) == 1
+    assert library.queue_counts() == {"pending": 1}
+
+
 def test_known_combines_downloaded_and_queued_without_repeats():
     library.add_track(_track("a"), Path("a.m4a"))
     library.enqueue([_track("a"), _track("b")], "salsa")

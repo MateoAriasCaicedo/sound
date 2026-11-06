@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS plays (
 );
 CREATE INDEX IF NOT EXISTS plays_by_video ON plays (video_id);
 CREATE INDEX IF NOT EXISTS plays_by_time ON plays (played_at);
+CREATE INDEX IF NOT EXISTS tracks_by_artist ON tracks (artist COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS tracks_by_title ON tracks (title COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS tracks_by_genre ON tracks (genre COLLATE NOCASE);
 """
 
 QUEUE_FIELDS = ("video_id", "title", "artist", "album", "duration", "cover", "genre")
@@ -125,7 +128,7 @@ def _prepare(conn: sqlite3.Connection, path: Path, existed: bool) -> None:
         _migrate(conn)
         if version < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            conn.commit()
+        conn.commit()  # también confirma columnas añadidas si la versión ya era la actual
         _ready.add(key)
 
 
@@ -148,6 +151,16 @@ def all_tracks(db_path: Path | None = None) -> list[dict]:
             " ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_track(video_id: str, db_path: Path | None = None) -> dict | None:
+    """Fila completa de una canción descargada, o None si no está en la biblioteca."""
+    with closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT video_id, title, artist, album, genre, duration, path, year, has_cover,"
+            " added_at FROM tracks WHERE video_id = ?", (video_id,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def genre_label(genre: str, db_path: Path | None = None) -> str:
@@ -193,13 +206,27 @@ def find_tracks(text: str, db_path: Path | None = None) -> list[dict]:
     """Canciones de la biblioteca por video_id exacto o por texto en título, artista o álbum.
 
     Sin distinguir mayúsculas ni tildes. Si `text` es un video_id existente, solo devuelve esa.
+    El filtro se hace en SQLite (con una función de normalización) para no traer toda la tabla
+    a Python cuando la biblioteca es grande.
     """
-    tracks = all_tracks(db_path)
-    exact = [t for t in tracks if t["video_id"] == text]
-    if exact:
-        return exact
-    wanted = fold(text)
-    return [t for t in tracks if wanted in fold(f"{t['title']} {t['artist']} {t['album'] or ''}")]
+    columns = "video_id, title, artist, album, genre, duration, path"
+    with closing(connect(db_path)) as conn:
+        exact = conn.execute(
+            f"SELECT {columns} FROM tracks WHERE video_id = ?", (text,)
+        ).fetchall()
+        if exact:
+            return [dict(row) for row in exact]
+        conn.create_function(
+            "sound_fold", 1, lambda value: fold(str(value or "")), deterministic=True
+        )
+        wanted = fold(text)
+        rows = conn.execute(
+            f"SELECT {columns} FROM tracks"
+            " WHERE instr(sound_fold(title || ' ' || artist || ' ' || coalesce(album, '')), ?) > 0"
+            " ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE",
+            (wanted,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def without_cover(db_path: Path | None = None) -> list[dict]:
@@ -346,6 +373,20 @@ def retry_failed(db_path: Path | None = None) -> int:
     with closing(connect(db_path)) as conn, conn:
         return conn.execute(
             "UPDATE queue SET status = 'pending', error = NULL WHERE status = 'failed'"
+        ).rowcount
+
+
+def requeue(video_ids: list[str], db_path: Path | None = None) -> int:
+    """Vuelve a poner en la cola canciones ya terminadas o fallidas.
+
+    Se usa cuando un archivo local resulta incompleto: sigue en `tracks`, así que `enqueue` no
+    lo reencolaría, pero el trabajador lo apartará como dañado al volver a descargarlo.
+    """
+    with closing(connect(db_path)) as conn, conn:
+        return conn.executemany(
+            "UPDATE queue SET status = 'pending', error = NULL"
+            " WHERE video_id = ? AND status IN ('done', 'failed')",
+            [(video_id,) for video_id in video_ids],
         ).rowcount
 
 

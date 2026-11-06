@@ -115,9 +115,27 @@ def _link(d, w):
     _line(d, [(9.5, 14.5), (14.5, 9.5)], w)
 
 
+def _more(d, w):
+    """Tres puntos: el resto de acciones de la biblioteca."""
+    for x in (5.5, 12, 18.5):
+        d.ellipse(((x - 1.6) * SS, 10.4 * SS, (x + 1.6) * SS, 13.6 * SS), fill=255)
+
+
+def _settings(d, w):
+    """Engranaje de ocho dientes: ajustes y atajos."""
+    _line(d, _arc(12, 12, 7.5, 0, 360), w)
+    _line(d, _arc(12, 12, 3, 0, 360), w)
+    for angle in range(0, 360, 45):
+        a = math.radians(angle)
+        x0, y0 = 12 + 7.5 * math.cos(a), 12 + 7.5 * math.sin(a)
+        x1, y1 = 12 + 10 * math.cos(a), 12 + 10 * math.sin(a)
+        _line(d, [(x0, y0), (x1, y1)], w)
+
+
 _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=_repeat1,
               infinity=_infinity, xfade=_xfade, queue=_queue, volume=_volume, search=_search,
-              theme=_theme, downloads=_downloads, note=_note, back=_back, link=_link)
+              theme=_theme, downloads=_downloads, note=_note, back=_back, link=_link,
+              more=_more, settings=_settings)
 
 
 def names() -> list[str]:

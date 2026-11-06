@@ -8,10 +8,14 @@ organiza por género y la reproduce en una ventana propia con cola automática y
 
 ## Instalación para usuarios (Windows 10/11)
 
-1. Descarga `Sound-1.0.1-setup.exe` desde la página de *Releases* del repositorio.
+1. Descarga `Sound-1.0.2-setup.exe` desde la página de *Releases* del repositorio.
 2. Ejecútalo. Se instala **solo para tu usuario** (no pide administrador) en
    `%LOCALAPPDATA%\Programs\Sound`, con acceso directo en el menú Inicio.
 3. Abre Sound y pulsa **Descargas → Diagnóstico** si algo no funciona.
+
+El instalador deja marcada la opción **«Iniciar Sound al iniciar Windows»**; puedes
+desmarcarla durante la instalación. Después se cambia en **Ajustes → Sistema → Iniciar con
+Windows**, y al desinstalar la entrada se borra sola.
 
 No hace falta instalar Python: el instalador incluye el intérprete, Tcl/Tk y Node.js (YouTube lo
 necesita para resolver los enlaces). **ffmpeg es opcional**: sin él no hay forma de onda real ni
@@ -23,7 +27,7 @@ de música.
 
 ### Modo portable
 
-Descarga el ZIP `Sound-windows.zip` del release, descomprímelo y crea un archivo vacío llamado
+Descarga el ZIP `Sound-1.0.2-windows.zip` del release, descomprímelo y crea un archivo vacío llamado
 `portable.txt` junto a `Sound.exe`. Los datos se guardarán en `data\` dentro de esa carpeta.
 
 ## Primeros pasos y problemas con YouTube
@@ -33,8 +37,10 @@ YouTube cambia a menudo y a veces pide iniciar sesión:
 - **«Sign in to confirm you're not a bot»**: abre **Descargas → Cookies de YouTube** y elige el
   navegador donde tengas la sesión de YouTube iniciada. Vuelve a pulsar **Reintentar**. Las
   cookies se leen en tu equipo y no se envían a ningún servidor de Sound.
-- **«Unable to extract…»**: pulsa **Descargas → Actualizar yt-dlp** (en la versión instalada no
-  hace falta pip) y reinicia la ventana.
+- **«Unable to extract…»**: Sound busca una versión nueva de yt-dlp al arrancar (como mucho una
+  vez al día) y la usa al reiniciar. También puedes forzarlo con **Descargas → Actualizar
+  yt-dlp** (en la versión instalada no hace falta pip). Se puede desactivar en **Ajustes →
+  Descargas → Actualizar yt-dlp automáticamente**.
 - **Node.js**: va incluido en el instalador. En una instalación desde el código, instálalo tú.
 - **Sin conexión**: la cola se queda pendiente y se reanuda sola cuando vuelve internet.
 
@@ -60,6 +66,7 @@ carpeta de datos. Ahí mismo puedes abrir la carpeta de datos y el registro.
 | `sound diagnostico` | Comprueba Node, ffmpeg, internet, cookies, datos y espacio |
 | `sound recuperar [--desde informe.json] [--si]` | Reencola las reproducciones de un informe de recuperación |
 | `sound historial [-n 20]` | Lo último que escuchaste |
+| `sound historial --limpiar [--dias 730]` | Borra reproducciones más antiguas que N días |
 | `sound top [-n 20] [--dias 30]` | Lo más escuchado |
 | `sound duplicados [--borrar] [--si]` | Encuentra la misma canción con distinto id |
 | `sound editar TEXTO --titulo … --artista … --album … --genero … --anio …` | Cambia las etiquetas |
@@ -79,9 +86,22 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Selección múltiple**: clic, `Ctrl+clic` y `Mayús+clic`; `Ctrl+A` selecciona la vista actual.
 - **Me gusta**: clic derecho → «Me gusta» (o `Ctrl+L`).
 - **Duplicados y etiquetas**: clic derecho en la lista.
+- **Archivos incompletos**: se marcan con `✗` y se conservan; clic derecho → «Volver a descargar
+  (archivo incompleto)». La copia anterior se renombra como `.damaged-…`, nunca se borra sola.
 - **Música por frase**, **Importar** y **Descargas**: páginas dentro de la misma ventana.
   `Esc` o «← Biblioteca» vuelve.
-- **Cookies de YouTube**: en Descargas, para resolver el aviso anti-bot.
+- **Ajustes** (icono de engranaje o `Ctrl+,`): tema, animaciones, orden, repetición, cola
+  automática, transición, normalización, cookies, actualización automática de yt-dlp, inicio
+  con Windows, mantenimiento y lista de atajos.
+- **Más acciones** (icono «⋯»): duplicados, exportar M3U, archivos que faltan,
+  normalización y diagnóstico sin abrir el menú contextual.
+- **Atajos**: `Ctrl+F` buscar, `Ctrl+G` música por frase, `Ctrl+L` Me gusta,
+  `Ctrl+A` seleccionar todo, `Ctrl+M` silenciar, `Ctrl+↑/↓` volumen, `Espacio`
+  reproducir/pausar, `Supr` eliminar y `Esc` volver o cerrar «A continuación».
+- **Cookies de YouTube**: en Descargas, para resolver el aviso anti-bot tanto al descargar como al
+  reproducir por streaming. Cambiar de navegador las recarga sin reiniciar.
+- **Poco espacio en disco**: si quedan menos de 2 GB, las descargas pasan a una a la vez; por
+  debajo de 500 MB se pausan y se avisa. Se reanudan solas al liberar espacio.
 - **Diagnóstico**: en Descargas, con comprobaciones del entorno y accesos a datos y registro.
 - **Sesión**: al cerrar se guardan canción, posición y cola. Al abrir aparece «Continúa donde lo
   dejaste» y no suena nada hasta que pulses play.
@@ -137,12 +157,14 @@ Quedan disponibles `sound` (CLI) y `sound-ui` (ventana). También funcionan
 
 ```powershell
 .\packaging\build.ps1              # genera dist\Sound\Sound.exe
-.\packaging\build.ps1 -Installer   # además genera dist\Sound-1.0.1-setup.exe
+.\packaging\build.ps1 -Installer   # además genera dist\Sound-1.0.2-setup.exe
 ```
 
 Requiere [Inno Setup 6](https://jrsoftware.org/isinfo.php) para el instalador. El script descarga
-Node.js si falta y lo incluye en la build. La firma de código no se hace automáticamente: para
-evitar avisos de SmartScreen hay que firmar `Sound.exe` y el instalador con un certificado.
+Node.js si falta y lo incluye en la build. La firma de código sigue siendo opcional: define
+`SOUND_SIGN_CERT` (ruta al `.pfx`), `SOUND_SIGN_PASSWORD` y, si quieres sellar la hora,
+`SOUND_SIGN_TIMESTAMP`; el script firma `Sound.exe` y el instalador si `signtool.exe` está en el
+PATH. Sin certificado, Windows SmartScreen avisará.
 
 ### Estructura
 
@@ -165,10 +187,12 @@ app/
     loudness.py     ReplayGain con ffmpeg
     waveform.py     ondas reales en caché
     filters.py      descarte de mixes, covers y directos
+    media.py        tolerancia de duración y cuarentena de archivos
     atomic.py       escrituras atómicas
     log.py          registro rotativo
   ui/
     main.py         ventana (coordina las piezas)
+    events.py       bucle de eventos de hilos y descargas
     page.py         base de las páginas integradas
     playqueue.py    cola de reproducción
     downloads.py    puente con el servicio de descargas

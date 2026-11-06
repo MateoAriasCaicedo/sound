@@ -1,8 +1,8 @@
 ; Instalador de Sound para Windows. Se compila con Inno Setup 6:
-;   iscc /DMyAppVersion=1.0.1 installer.iss
+;   iscc /DMyAppVersion=1.0.2 installer.iss
 #define MyAppName "Sound"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.1"
+  #define MyAppVersion "1.0.2"
 #endif
 #define MyAppPublisher "Mateo Arias"
 #define MyAppURL "https://github.com/MateoAriasCaicedo/sound"
@@ -38,7 +38,14 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
+Name: "autostart"; Description: "Iniciar {#MyAppName} al iniciar Windows"; GroupDescription: "Inicio:"; Flags: checkedonce
 Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; GroupDescription: "Accesos directos:"; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Sound"; ValueData: """{app}\{#MyAppExeName}"""; Tasks: autostart
+; Aunque la tarea no se marcara al instalar, si luego se activa desde Ajustes la
+; desinstalación también debe quitar el arranque automático.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Sound"; Flags: uninsdeletevalue
 
 [Files]
 Source: "dist\Sound\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

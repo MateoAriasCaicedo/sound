@@ -48,6 +48,51 @@ def fake_download(monkeypatch):
     return calls
 
 
+def test_worker_survives_a_disk_error_instead_of_dying(monkeypatch, fake_download):
+    calls = []
+
+    def flaky_free_bytes(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disco no disponible")
+        return 10 * 1024**4
+
+    monkeypatch.setattr(downloader, "free_bytes", flaky_free_bytes)
+    library.enqueue([_track("a")], None)
+    svc = service.DownloadService(persistent=False, workers=1)
+    svc._sleep_or_wake = lambda _seconds: None
+
+    svc.start()
+    svc.wait_idle()
+    svc.close()
+
+    assert library.queue_counts() == {"done": 1}
+
+
+def test_close_keeps_the_lock_while_a_worker_is_still_running(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def slow(track, genre, pacer, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return Path(f"{track['video_id']}.m4a"), 1
+
+    monkeypatch.setattr(downloader, "download_with_retry", slow)
+    library.enqueue([_track("a")], None)
+    svc = service.DownloadService(persistent=False, workers=1)
+    svc.start()
+    assert started.wait(5)
+
+    svc.close(timeout=0.05)
+    assert service._try_lock(service._lock_path()) is None  # sigue protegido
+
+    release.set()
+    svc.close(timeout=5)
+    again = service._try_lock(service._lock_path())
+    assert again is not None  # ya terminó: se puede soltar
+    service._unlock(again)
+
+
 # ---------- aviso de yt-dlp desactualizado ----------
 def _failing(monkeypatch, message):
     def fake(track, genre, pacer, **kwargs):
@@ -304,7 +349,61 @@ def test_low_disk_pauses_once_and_resumes_when_there_is_space(monkeypatch, fake_
     free[0] = downloader.MIN_FREE_BYTES * 10  # el usuario liberó espacio
     svc.submit([], None)  # despierta a los trabajadores
     assert wait_until(lambda: library.queue_counts() == {"done": 1})
+    assert any(k == "disk_ok" for k, _, _ in events)
     svc.close()
+
+
+def test_low_space_emits_disk_low_once(monkeypatch, fake_download, collect, events):
+    monkeypatch.setattr(service, "IDLE_POLL", 0.01)
+    monkeypatch.setattr(service, "LOW_DISK_POLL", 0.01)
+    monkeypatch.setattr(downloader, "free_bytes",
+                        lambda *a: downloader.LOW_FREE_BYTES - 1)
+    library.enqueue([_track("a")], "salsa")
+    svc = service.DownloadService(collect, persistent=True, workers=2)
+
+    svc.start()
+    assert wait_until(lambda: any(k == "disk_low" for k, _, _ in events))
+    assert wait_until(lambda: library.queue_counts() == {"done": 1})
+    time.sleep(0.1)
+    assert [k for k, _, _ in events].count("disk_low") == 1
+    svc.close()
+
+
+def test_low_space_limits_downloads_to_one(monkeypatch):
+    monkeypatch.setattr(service, "IDLE_POLL", 0.01)
+    monkeypatch.setattr(downloader, "free_bytes",
+                        lambda *a: downloader.MIN_FREE_BYTES + 1)  # zona de aviso, no crítica
+    active = peak = 0
+    lock = threading.Lock()
+
+    def fake(track, genre, pacer, **kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return Path(f"{track['video_id']}.m4a"), 1
+
+    monkeypatch.setattr(downloader, "download_with_retry", fake)
+    library.enqueue([_track(c) for c in "abcd"], "salsa")
+    svc = service.DownloadService(persistent=False, workers=3)
+
+    svc.start()
+    svc.wait_idle()
+    svc.close()
+
+    assert peak == 1
+    assert library.queue_counts() == {"done": 4}
+
+
+def test_fetch_now_refuses_to_fill_the_last_megabytes(monkeypatch):
+    monkeypatch.setattr(downloader, "free_bytes", lambda *a: downloader.MIN_FREE_BYTES - 1)
+    svc = service.DownloadService()
+
+    with pytest.raises(OSError, match="espacio suficiente"):
+        svc.fetch_now(_track("a"), "salsa")
 
 
 # ---------- fetch_now (reproducir una canción ☁) ----------

@@ -9,15 +9,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-import requests
 import yt_dlp
 from mutagen import MutagenError
 from mutagen.mp4 import MP4, MP4Cover
-from ytmusicapi.exceptions import YTMusicError
 
-from . import autogenre, errors, library, ytsearch
-from .config import COOKIES_FROM_BROWSER, MUSIC_DIR
+from . import autogenre, errors, library, media, ytsearch
+from . import cookies as _cookies
+from . import log as _log
 from .config import MAX_PARALLEL as MAX_PARALLEL  # noqa: F401 - API que usa service
+from .config import MUSIC_DIR
+
+log = _log.get("downloader")
 
 # m4a (AAC) nativo de YouTube: no requiere ffmpeg para convertir.
 FORMAT = "140/bestaudio[ext=m4a]"
@@ -29,40 +31,31 @@ _BASE_OPTS = {
     "noprogress": True,  # el avance se reporta por on_progress, no por consola
     "noplaylist": True,
     "retries": 5,
-    "continue_dl": True,
+    "continuedl": True,  # clave real de YoutubeDL (con guion bajo solo la usa argparse)
     "js_runtimes": {"node": {}},  # YouTube exige un runtime JS para resolver los enlaces
 }
-_COOKIES_LOCK = threading.Lock()
-_cookies_browser = COOKIES_FROM_BROWSER
-_options_generation = 0
-DURATION_SLACK_S = 10  # tolerancia entre la duración anunciada y la del archivo
-DURATION_SLACK_PCT = 0.10
+# Compatibilidad: la tolerancia real vive en media.py y la comparten descarga y reproducción.
+DURATION_SLACK_S = media.SLACK_S
+DURATION_SLACK_PCT = media.SLACK_PCT
 COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave", "opera", "vivaldi", "chromium")
 
 
 def configure_cookies(browser: str | None) -> None:
     """Cambia el navegador del que se leen las cookies sin reiniciar la app.
 
-    Cada hilo tiene su propia instancia de yt-dlp: la generación hace que la próxima descarga
-    de cada hilo cree una nueva con las cookies al día.
+    El estado es compartido con el streaming: la próxima descarga o reproducción de cada hilo
+    recrea su instancia de yt-dlp con las cookies al día.
     """
-    global _cookies_browser, _options_generation
-    with _COOKIES_LOCK:
-        _cookies_browser = (browser or "").strip()
-        _options_generation += 1
+    _cookies.configure(browser)
 
 
 def cookies_browser() -> str:
-    with _COOKIES_LOCK:
-        return _cookies_browser
+    return _cookies.browser()
 
 
 def _options() -> dict:
-    opts = dict(_BASE_OPTS)
-    browser = cookies_browser()
-    if browser:  # p. ej. "firefox" para vídeos con restricción de edad o el aviso de bot
-        opts["cookiesfrombrowser"] = (browser,)
-    return opts
+    # p. ej. "firefox" para vídeos con restricción de edad o el aviso de bot
+    return {**_BASE_OPTS, **_cookies.ydl_options()}
 
 
 class IntegrityError(Exception):
@@ -73,8 +66,19 @@ class WrongDuration(Exception):
     """El archivo dura distinto de lo anunciado (video equivocado o truncado): reintentar no ayuda."""
 
 
+# Nombres reservados por Windows (también con extensión: CON.m4a no se puede crear).
+_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
 def safe_name(text: str) -> str:
-    return _BAD_CHARS.sub("_", text).strip(" .")[:120] or "sin_nombre"
+    name = _BAD_CHARS.sub("_", text).strip(" .")[:120] or "sin_nombre"
+    if name.split(".")[0].upper() in _RESERVED_NAMES:
+        name = f"_{name}"
+    return name
 
 
 MAX_PATH = 240  # margen bajo los 260 caracteres de Windows (yt-dlp añade '.part' al descargar)
@@ -93,10 +97,21 @@ def _target_path(dest: Path, track: dict) -> Path:
         # dos álbumes): se distingue por id. El id es único, así que esa reserva no puede chocar.
         path = dest / f"{name}{id_tag}{suffix}"
         library.reserve(path, track["video_id"])
+    if len(str(path)) > MAX_PATH:
+        # La carpeta de destino ya consume casi todo el límite: un nombre mínimo con el id sigue
+        # siendo único y, si ni así cabe, se avisa en vez de fallar con un error críptico de yt-dlp.
+        short_artist = safe_name(track["artist"])[:12].rstrip(" .")
+        path = dest / f"{short_artist}-{track['video_id']}{suffix}"
+        if len(str(path)) > MAX_PATH:
+            raise OSError(
+                f"no se puede guardar «{track['title']}»: la ruta supera {MAX_PATH} caracteres"
+            )
+        library.reserve(path, track["video_id"])
     return path
 
 
 _JPEG, _PNG = b"\xff\xd8", b"\x89PNG\r\n\x1a\n"
+MAX_COVER_BYTES = 8 * 1024 * 1024  # una carátula enorme no debe llenar la memoria
 
 
 def _fetch_cover(url: str | None, sleep: Callable[[float], None] | None = None) -> MP4Cover | None:
@@ -107,10 +122,15 @@ def _fetch_cover(url: str | None, sleep: Callable[[float], None] | None = None) 
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(request, timeout=15) as resp:
-                data = resp.read()
-        except OSError:
+                try:
+                    data = resp.read(MAX_COVER_BYTES + 1)
+                except TypeError:  # dobles de prueba sin el argumento opcional
+                    data = resp.read()
+        except Exception:  # noqa: BLE001 - la carátula es opcional; nunca debe tumbar la descarga
             (sleep or time.sleep)(1 + attempt)  # se resuelve al llamar: así los tests pueden sustituirlo
             continue
+        if not isinstance(data, bytes) or len(data) > MAX_COVER_BYTES:
+            return None
         if data.startswith(_JPEG):
             return MP4Cover(data, MP4Cover.FORMAT_JPEG)
         if data.startswith(_PNG):
@@ -125,8 +145,8 @@ def _enrich(track: dict) -> dict:
         return track
     try:
         extra = ytsearch.song_details(track["video_id"])
-    except (requests.RequestException, YTMusicError, KeyError, IndexError):
-        return track  # se pierde un dato de etiqueta, no la canción
+    except Exception:  # noqa: BLE001 - se pierde un dato de etiqueta, nunca la descarga
+        return track
     return {**track, **{key: value for key, value in extra.items() if value and not track.get(key)}}
 
 
@@ -139,7 +159,7 @@ def _finish(path: Path, track: dict, genre: str | None) -> bool:
         raise IntegrityError(f"archivo descargado ilegible: {exc}") from exc
 
     expected, length = track.get("duration"), audio.info.length
-    if expected and abs(length - expected) > max(DURATION_SLACK_S, expected * DURATION_SLACK_PCT):
+    if expected and media.duration_mismatch(expected, length):
         path.unlink(missing_ok=True)
         raise WrongDuration(f"duración {length:.0f}s, se esperaban {expected}s")
 
@@ -160,12 +180,15 @@ def _finish(path: Path, track: dict, genre: str | None) -> bool:
 
 
 _local = threading.local()
+# Un pool compartido: enriquecer metadatos y consultar el género no debe crear un hilo por canción.
+_ENRICH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="metadata")
 
 
 def _get_ydl() -> yt_dlp.YoutubeDL:
     ydl = getattr(_local, "ydl", None)
     generation = getattr(_local, "generation", None)
-    if ydl is None or generation != _options_generation:
+    current_generation = _cookies.generation()
+    if ydl is None or generation != current_generation:
         def hook(d: dict) -> None:
             callback = getattr(_local, "callback", None)
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -174,7 +197,7 @@ def _get_ydl() -> yt_dlp.YoutubeDL:
 
         ydl = yt_dlp.YoutubeDL({**_options(), "progress_hooks": [hook]})
         _local.ydl = ydl
-        _local.generation = _options_generation
+        _local.generation = current_generation
     return ydl
 
 
@@ -217,18 +240,9 @@ def _audio_ok(path: Path, track: dict) -> bool:
         length = float(audio.info.length or 0)
     except Exception:  # noqa: BLE001 - cualquier fallo de lectura = corrupto
         return False
-    expected = track.get("duration")
-    if not expected:
-        return True
-    try:
-        expected = float(expected)
-    except (TypeError, ValueError):
-        return True
     if length <= 0:
         return False
-    if abs(length - expected) > max(DURATION_SLACK_S, expected * DURATION_SLACK_PCT):
-        return False
-    return True
+    return not media.duration_mismatch(track.get("duration"), length)
 
 
 def download_track(
@@ -245,10 +259,10 @@ def download_track(
     music_dir = Path(music_dir or MUSIC_DIR)
     existing = library.get_path(track["video_id"])
     if existing and not _audio_ok(existing, track):
-        try:
-            existing.unlink(missing_ok=True)
-        except OSError:
-            pass
+        moved = media.quarantine(existing)
+        if moved is None:
+            raise OSError(f"el archivo dañado no se pudo apartar: {existing}")
+        log.warning("archivo dañado apartado para volver a descargarlo: %s", moved)
         library.remove_track(track["video_id"])
         existing = None
     if existing:
@@ -257,14 +271,16 @@ def download_track(
     dest = music_dir / "por-genero" / safe_name(genre) if genre else music_dir / "sueltas"
     dest.mkdir(parents=True, exist_ok=True)
     final = _target_path(dest, track)  # reserva el nombre: otro trabajador no puede elegir el mismo
+    # El álbum/año y el género se resuelven mientras baja el audio. La consulta de género tarda
+    # varios segundos por el límite de iTunes, así que ocultarla detrás de la descarga importa.
+    enriching = _ENRICH_POOL.submit(_enrich, track)
+    genre_future = _ENRICH_POOL.submit(autogenre.lookup, track) if not genre else None
     try:
-        with ThreadPoolExecutor(1) as pool:
-            enriching = pool.submit(_enrich, track)  # la consulta de álbum/año corre mientras baja el audio
-            _download_audio(track["video_id"], str(final.with_suffix(".%(ext)s")), on_progress)
+        _download_audio(track["video_id"], str(final.with_suffix(".%(ext)s")), on_progress)
         track = enriching.result()
-        if not genre:
+        if not genre and genre_future is not None:
             try:
-                genre = autogenre.lookup(track)
+                genre = genre_future.result()
             except Exception:  # noqa: BLE001 - el género es un extra: nunca frena la descarga
                 genre = None
             if genre:
@@ -279,13 +295,51 @@ def download_track(
 
 
 MIN_FREE_BYTES = 500 * 1024**2  # por debajo de esto la cola se detiene sin perder nada
-EST_TRACK_BYTES = 5 * 1024**2  # tamaño medio de una canción, para avisar antes de empezar
+LOW_FREE_BYTES = 2 * 1024**3  # por debajo de esto se descarga de una en una
+DISK_RECOVER_BYTES = 250 * 1024**2  # margen para no oscilar entre estados al liberar espacio
+EST_TRACK_BYTES = 5 * 1024**2  # tamaño mínimo estimado de una canción
+AUDIO_BYTES_PER_SECOND = 16 * 1024  # ~128 kbps: estimación del tamaño de una canción
 
 
 def free_bytes(path: Path | None = None) -> int:
+    """Espacio libre en el disco de la carpeta de música, sin crear carpetas en cada consulta."""
     path = Path(path or MUSIC_DIR)
-    path.mkdir(parents=True, exist_ok=True)
+    while not path.exists() and path != path.parent:  # si aún no existe, se usa su antecesora
+        path = path.parent
     return shutil.disk_usage(path).free
+
+
+def disk_level(free: int | None = None, previous: str = "ok") -> str:
+    """Estado del disco: 'ok', 'low' (una descarga a la vez) o 'critical' (pausa).
+
+    `previous` añade histéresis: al liberar espacio hay que superar el umbral de recuperación
+    para volver a 'ok', y así no se repiten los avisos si el espacio oscila alrededor del límite.
+    """
+    if free is None:
+        free = free_bytes()
+    if free < MIN_FREE_BYTES:
+        return "critical"
+    if previous == "critical" and free < MIN_FREE_BYTES + DISK_RECOVER_BYTES:
+        return "critical"
+    if free < LOW_FREE_BYTES:
+        return "low"
+    if previous in ("low", "critical") and free < LOW_FREE_BYTES + DISK_RECOVER_BYTES:
+        return "low"
+    return "ok"
+
+
+def estimate_track_bytes(track: dict) -> int:
+    """Tamaño aproximado de una canción según su duración, con un mínimo conservador."""
+    try:
+        duration = max(0.0, float(track.get("duration") or 0))
+    except (TypeError, ValueError):
+        duration = 0.0
+    return max(EST_TRACK_BYTES, int(duration * AUDIO_BYTES_PER_SECOND))
+
+
+def estimate_pending_bytes(tracks: list[dict]) -> int:
+    """Espacio aproximado para descargar todas las canciones de `tracks`."""
+    return sum(estimate_track_bytes(track) for track in tracks)
 
 
 MAX_ATTEMPTS = 4
@@ -398,12 +452,14 @@ def run_queue(
     on_done: Callable[[dict, Path | None, Exception | None], None] | None = None,
     on_retry: Callable[[dict, int, float, Exception], None] | None = None,
     on_progress: Callable[[dict, float], None] | None = None,
+    on_disk: Callable[[str, int], None] | None = None,
 ) -> dict[str, int]:
     """Procesa la cola pendiente en paralelo. Un fallo no detiene el resto.
 
     El estado vive en SQLite: si se interrumpe (Ctrl+C, corte de luz), lo que no terminó
     sigue 'pending' y se retoma al volver a llamar. `on_progress(canción, 0..1)` se llama
     desde los hilos de descarga, así que quien lo use (p. ej. una ventana) debe ser seguro entre hilos.
+    `on_disk(tipo, libres)` recibe disk_low, low_disk y disk_ok para avisar del espacio.
     """
     from .service import DownloadService  # import tardío: el servicio usa este módulo
 
@@ -416,6 +472,8 @@ def run_queue(
             on_retry(track, info["attempt"], info["delay"], info["error"])
         elif kind == "progress" and on_progress:
             on_progress(track, info["fraction"])
+        elif kind in ("disk_low", "low_disk", "disk_ok") and on_disk:
+            on_disk(kind, info["free"])
 
     service = DownloadService(on_event, persistent=False)
     service.start()

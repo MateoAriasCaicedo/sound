@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core import downloader, library
+from app.core import downloader, library, service
 
 
 def _track(video_id="v1"):
@@ -179,14 +179,19 @@ def test_run_queue_stops_cleanly_when_disk_is_nearly_full(monkeypatch, temp_db):
 
 def test_run_queue_stops_midway_when_space_runs_out(monkeypatch, temp_db):
     library.enqueue([_track(c) for c in "abcd"], "salsa")
-    monkeypatch.setattr(downloader, "MAX_PARALLEL", 1)
-    free = iter([downloader.MIN_FREE_BYTES + 1, downloader.MIN_FREE_BYTES + 1])  # alcanza para 2
+    monkeypatch.setattr(service, "MAX_PARALLEL", 1)  # una sola descarga a la vez
+    downloaded = []
 
-    def low_after_two(*a):
-        return next(free, downloader.MIN_FREE_BYTES - 1)
+    def low_after_two(*_a):
+        return (downloader.MIN_FREE_BYTES - 1 if len(downloaded) >= 2
+                else 10 * 1024**4)
+
+    def fake_download(*_a, **_k):
+        downloaded.append(1)
+        return Path("x.m4a"), 1
 
     monkeypatch.setattr(downloader, "free_bytes", low_after_two)
-    monkeypatch.setattr(downloader, "download_with_retry", lambda *a, **k: (Path("x.m4a"), 1))
+    monkeypatch.setattr(downloader, "download_with_retry", fake_download)
 
     counts = downloader.run_queue()
 

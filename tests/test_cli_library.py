@@ -28,6 +28,17 @@ def test_historial_and_top(capsys):
     assert "3x  X - Tema A" in top and "Tema B" not in top
 
 
+def test_historial_limpiar_prunes_old_plays(capsys):
+    from contextlib import closing
+
+    history.record({"video_id": "vieja", "title": "Vieja", "artist": "X"})
+    with closing(library.connect()) as conn, conn:
+        conn.execute("UPDATE plays SET played_at = datetime('now', '-900 days')")
+
+    assert "1 reproducciones antiguas borradas" in run(["historial", "--limpiar"], capsys)
+    assert history.recent() == []
+
+
 def test_duplicados_lists_without_deleting_by_default(tmp_path, capsys):
     keep = add(tmp_path, "a", "Hotel California", "Eagles", album="HC", has_cover=True)
     extra = add(tmp_path, "b", "Hotel California - Remastered", "Eagles")

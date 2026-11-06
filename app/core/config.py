@@ -270,10 +270,13 @@ def activate_vendor() -> str | None:
     try:
         import json
         info = json.loads(marker.read_text(encoding="utf-8"))
-        path = Path(info["path"])
-        if (path / "yt_dlp" / "__init__.py").exists():
-            sys.path.insert(0, str(path))
-            return str(info.get("version") or path)
+        root = VENDOR_DIR.resolve()
+        path = Path(info["path"]).resolve()
+        # El manifiesto es datos: nunca se carga código de una ruta arbitraria, solo de vendor/.
+        if root not in path.parents or not (path / "yt_dlp" / "__init__.py").exists():
+            return None
+        sys.path.insert(0, str(path))
+        return str(info.get("version") or path)
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return None

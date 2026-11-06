@@ -1,3 +1,6 @@
+import json
+import time
+
 import pytest
 
 from app.core import genres, ytsearch
@@ -14,6 +17,27 @@ def no_song_search_top_up(monkeypatch):
 
 def test_norm_ignores_accents_and_case():
     assert genres.norm("Rock en Español") == "rock en espanol"
+
+
+def test_resolve_uses_cached_categories_without_network(tmp_path, monkeypatch):
+    cache = tmp_path / "genres.json"
+    cache.write_text(json.dumps({
+        "saved_at": time.time(),
+        "playlists": [],
+        "categories": {"Rock": "p1"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(genres, "GENRE_CACHE", cache)
+
+    def offline():
+        raise ConnectionError("sin internet")
+
+    monkeypatch.setattr(ytsearch, "genre_categories", offline)
+    monkeypatch.setattr(ytsearch, "mood_playlists", lambda params: [{"playlist_id": params, "title": "x"}])
+
+    label, playlists = genres.resolve("Rock")
+
+    assert label == "Rock"
+    assert playlists[0]["playlist_id"] == "p1"
 
 
 def test_resolve_prefers_official_genre(monkeypatch):

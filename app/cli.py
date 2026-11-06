@@ -219,11 +219,18 @@ def run() -> None:
     for problem in health.problems():
         print(f"Aviso: {problem}", flush=True)
 
-    pending = len(library.pending())
-    needed, free = pending * downloader.EST_TRACK_BYTES, downloader.free_bytes()
-    if pending and free < needed + downloader.MIN_FREE_BYTES:
+    pending_tracks = library.pending()
+    needed, free = downloader.estimate_pending_bytes(pending_tracks), downloader.free_bytes()
+    level = downloader.disk_level(free)
+    if pending_tracks and level == "critical":
+        print(f"Aviso: quedan {free / GB:.1f} GB libres y hay {len(pending_tracks)} canciones "
+              "pendientes. La cola se detendrá; libera espacio y usa: reanudar", flush=True)
+    elif pending_tracks and free < needed + downloader.MIN_FREE_BYTES:
         print(f"Aviso: hacen falta ~{needed / GB:.1f} GB y hay {free / GB:.1f} GB libres. "
               "La cola se detendrá a tiempo y podrás reanudarla.", flush=True)
+    elif pending_tracks and level == "low":
+        print(f"Aviso: quedan {free / GB:.1f} GB libres. Para no llenar el disco, "
+              "las descargas irán de una en una.", flush=True)
 
     def report(t: dict, path, err) -> None:
         status = "OK " if not err else "ERR"
@@ -234,8 +241,16 @@ def run() -> None:
         print(f"... reintento {attempt} de {t['title']} en {delay:.0f}s "
               f"({friendly(err)[:80]})", flush=True)
 
+    def disk_event(kind: str, free: int) -> None:
+        if kind == "disk_low":
+            print(f"Aviso: poco espacio ({free / GB:.1f} GB libres): "
+                  "las descargas irán de una en una.", flush=True)
+        elif kind == "low_disk":
+            print(f"Aviso: sin espacio suficiente ({free / GB:.1f} GB libres): "
+                  "se detiene la cola.", flush=True)
+
     try:
-        counts = downloader.run_queue(on_done=report, on_retry=retrying)
+        counts = downloader.run_queue(on_done=report, on_retry=retrying, on_disk=disk_event)
     except KeyboardInterrupt:
         # Lo que no terminó sigue 'pending' en la base; los hilos en espera no se pueden cortar limpio.
         print("\nPausado. Continúa con: reanudar", flush=True)

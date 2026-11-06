@@ -1,5 +1,56 @@
 # Cambios
 
+## 1.0.2 — 2026-11-06
+
+### Interfaz
+- Página **Ajustes** (icono de engranaje o `Ctrl+,`) que reúne tema, animaciones,
+  orden, repetición, cola automática, transición, normalización, cookies, mantenimiento
+  de la biblioteca y la lista de atajos.
+- Menú **Más acciones** en la barra superior: duplicados, exportar M3U, archivos que
+  faltan, normalización y diagnóstico, sin depender del clic derecho.
+- Preferencia para **reducir animaciones** (además de respetar la opción de Windows).
+- Atajos nuevos: `Ctrl+,`/`F1` (ajustes), `Ctrl+M` (silenciar) y `Ctrl+↑/↓` (volumen).
+  `Esc` también cierra el panel «A continuación».
+- La cola «A continuación» muestra cuántas canciones quedan y su duración total.
+- Las cookies del navegador elegido se aplican también al streaming; volver a elegirlo las relee
+  sin reiniciar la ventana.
+- **Iniciar con Windows** en Ajustes → Sistema (clave `Run` del usuario, sin administrador). El
+  instalador lo deja activado y la desinstalación lo borra.
+- Descargas muestra el **porcentaje en curso** de cada canción en su propia columna.
+- Importar usa el mismo campo dibujado que el resto de la aplicación; Diagnóstico
+  distingue los estados con ✓, ! y ✗ y permite abrir la carpeta de música.
+- Textos secundarios con contraste WCAG AA en ambos temas.
+
+### Descargas
+- Protección preventiva de espacio: por debajo de 2 GB las descargas van de una en una y por
+  debajo de 500 MB se pausan, con aviso en la ventana y en la CLI. Se reanudan solas al liberar
+  espacio y se tiene en cuenta la duración para estimar cuánto falta.
+
+### Estabilidad y datos
+- Un archivo local que no supera la comprobación de duración ya no se borra: se aparta con la
+  marca `.damaged-…` y se puede volver a descargar desde el menú contextual.
+- El bucle de eventos y el tick de reproducción se reprograman aunque un manejador falle.
+- Los trabajadores de descarga se recuperan de errores de disco o SQLite y un supervisor repone
+  los que mueran. Al cerrar se espera a los hilos antes de soltar el bloqueo entre procesos.
+- La comprobación de duración usa una sola tolerancia compartida (15 s / 20 %).
+- Volver a descargar un archivo incompleto conserva su género y el reintento vuelve a avisar si falla.
+- Calentar yt-dlp al arrancar ya no resuelve un vídeo de muestra: no hace red ni falla cuando ese
+  vídeo cambia de formatos.
+- yt-dlp se actualiza solo cuando hay una versión nueva (como mucho una comprobación al día): la
+  app empaquetada la descarga a `vendor/` y la usa al reiniciar; en desarrollo la instala con pip.
+  Si varias descargas seguidas fallan como si yt-dlp estuviera viejo, se intenta en ese momento.
+  Se puede desactivar en **Ajustes → Descargas**.
+
+### Rendimiento y mantenimiento
+- Una descarga terminada actualiza solo su fila; ya no se relee toda la biblioteca ni se analizan
+  todos los archivos al arrancar.
+- Búsqueda con caché de texto normalizado y filtro en SQLite; índices por artista, título y género.
+- El género y los metadatos se resuelven en un pool compartido mientras baja el audio.
+- Caché de categorías de géneros para buscar sin conexión; caché de streaming atómica y podada.
+- Historial con la fecha real de la última reproducción y comando `sound historial --limpiar`.
+- Actualizador: extracción segura del wheel, ruta de `vendor` validada y versión anterior conservada.
+- Tests nuevos para cuarentena, búsqueda, historial, caché offline y ciclo de vida del servicio.
+
 ## 1.0.1 — 2026-11-02
 
 ### Reproducción

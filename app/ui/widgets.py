@@ -187,7 +187,8 @@ class IconButton(tk.Canvas):
             self.bind("<Leave>", lambda e: self._hover(0.0, 170))
             self.bind("<ButtonPress-1>", lambda e: self._press(1.0, 60))
             self.bind("<ButtonRelease-1>", self._release)
-            self.bind("<Return>", lambda e: self.command())
+            self.bind("<Return>", self._key_fire)
+            self.bind("<space>", self._key_fire)
             self.bind("<FocusIn>", lambda e: self._focus(True))
             self.bind("<FocusOut>", lambda e: self._focus(False))
             Tooltip(self, anim, tip, lambda: (blend(self.c["bg"], self.c["fg"], 0.14), self.c["fg"]))
@@ -217,6 +218,12 @@ class IconButton(tk.Canvas):
         self._press(0.0, 170)
         if 0 <= e.x < self.d and 0 <= e.y < self.d and self.command:
             self.command()
+
+    def _key_fire(self, _e=None) -> str:
+        """Activa el botón con Enter/Espacio y evita que el atajo global haga otra cosa."""
+        if self.command:
+            self.command()
+        return "break"
 
     def _focus(self, on: bool) -> None:
         self.focused = on

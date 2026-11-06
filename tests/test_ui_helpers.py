@@ -16,6 +16,12 @@ def test_readable_on_reaches_contrast_on_both_themes():
             assert theme.contrast(theme.readable_on(color, bg), bg) >= 4.5
 
 
+def test_secondary_text_meets_contrast_on_both_themes():
+    for pal in (theme.LIGHT, theme.DARK):
+        for role in ("dim", "faint"):
+            assert theme.contrast(pal[role], pal["bg"]) >= 4.5, role
+
+
 def test_text_on_picks_the_most_legible():
     assert theme.text_on("#ffffff") == "#111114"
     assert theme.text_on("#000000") == "#ffffff"

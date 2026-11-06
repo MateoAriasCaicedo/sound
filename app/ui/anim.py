@@ -52,6 +52,27 @@ class Animator:
         self._loops.append(fn)
         self.wake()
 
+    def set_reduced(self, value: bool) -> None:
+        """Activa o desactiva las animaciones sin reiniciar la ventana.
+
+        Al activarlo se terminan de golpe las transiciones pendientes para que ningún control
+        quede a medio pintar; los bucles decorativos se apagan en su siguiente fotograma.
+        """
+        value = bool(value)
+        if value == self.reduced:
+            return
+        self.reduced = value
+        if value:
+            for key, (_t0, _dur, step, _ease, done) in list(self._tweens.items()):
+                self._tweens.pop(key, None)
+                try:
+                    step(1.0)
+                    if done:
+                        done()
+                except Exception:  # noqa: BLE001 - un control pudo desaparecer
+                    pass
+        self.wake()
+
     def wake(self) -> None:
         if self._job is None:
             self._job = self.root.after(FRAME_MS, self._frame)

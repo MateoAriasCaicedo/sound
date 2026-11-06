@@ -49,13 +49,11 @@ class DownloadsController:
     def on_event(self, kind: str, track: dict | None, **info) -> None:
         """Avisos del servicio. Llegan desde los hilos de descarga: aquí solo se encolan."""
         q = self.app.q
-        if kind == "low_disk":
-            q.put(("status", "Poco espacio en disco: descargas en pausa. "
-                             "Libera espacio y vuelve a pulsar Descargar."))
+        if kind in ("disk_low", "low_disk", "disk_ok"):
+            q.put(("disk", kind, info.get("free")))
             return
         if kind == "outdated":
-            q.put(("status", "Varias descargas seguidas fallan como si yt-dlp estuviera desactualizado. "
-                             "Pulsa «Actualizar yt-dlp» en Descargas."))
+            q.put(("outdated",))
             return
         if kind == "needs_cookies":
             q.put(("needs_cookies", info.get("error") or errors.COOKIE_HINT))
@@ -77,12 +75,12 @@ class DownloadsController:
                    vid in self.quiet))
 
     def configure_cookies(self, browser: str | None) -> None:
-        """Aplica el navegador elegido a las próximas descargas, sin reiniciar."""
+        """Aplica el navegador elegido a descargas y streaming, sin reiniciar."""
         try:
-            from ..core import downloader
+            from ..core import cookies
 
-            downloader.configure_cookies(browser)
-        except Exception as exc:  # noqa: BLE001 - si yt-dlp aún no cargó, no pasa nada
+            cookies.configure(browser)
+        except Exception as exc:  # noqa: BLE001 - si algo falla, se sigue sin cookies
             log.failure(log, "no se pudieron configurar las cookies", exc)
 
     @staticmethod
@@ -91,12 +89,22 @@ class DownloadsController:
         return counts.get("pending", 0) + counts.get("running", 0)
 
     # ---------- encolar ----------
+    MAX_START_ATTEMPTS = 20  # ~6 s: de sobra para importar yt-dlp sin dejar callbacks sin fin
+
     def submit(self, tracks: list[dict], genre: str | None, priority: int = 0,
-               quiet: bool = False) -> None:
+               quiet: bool = False, attempt: int = 0) -> None:
         """Entrega canciones al servicio, que guarda la cola en la base de datos: reintenta,
         espera si no hay internet y continúa donde quedó si se cierra la ventana."""
         if self.service is None:  # el servicio aún está arrancando
-            self.app.after(300, lambda: self.submit(tracks, genre, priority, quiet))
+            if attempt >= self.MAX_START_ATTEMPTS:
+                for track in tracks:
+                    self.app._set_state(track["video_id"], "✗")
+                self.app.status.configure(
+                    text="Las descargas no están disponibles: revisa Descargas → Diagnóstico")
+                return
+            self.app.after(
+                300, lambda: self.submit(tracks, genre, priority, quiet, attempt + 1)
+            )
             return
         for t in tracks:
             self.inflight.add(t["video_id"])
@@ -110,7 +118,8 @@ class DownloadsController:
 
         El respaldo va por delante de las descargas manuales pendientes: se está escuchando ya.
         """
-        self.submit([t], t.get("_genre"), priority=10 if quiet else 0, quiet=quiet)
+        genre = t.get("_genre") or t.get("genre")
+        self.submit([t], genre, priority=10 if quiet else 0, quiet=quiet)
 
     def download_ahead(self) -> None:
         """Las próximas AHEAD_DOWNLOADS canciones que irían por streaming se descargan solas:

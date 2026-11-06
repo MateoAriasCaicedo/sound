@@ -70,6 +70,28 @@ def test_clear_returns_how_many_plays_were_removed():
     assert history.recent() == []
 
 
+def test_recent_uses_the_timestamp_of_the_latest_play():
+    play("a")
+    play("b")
+    play("a")
+    with closing(library.connect()) as conn, conn:
+        conn.execute("UPDATE plays SET played_at = '2020-01-01 00:00:00' WHERE video_id = 'a'")
+
+    row = next(r for r in history.recent() if r["video_id"] == "a")
+
+    assert row["last_played"] == "2020-01-01 00:00:00"
+
+
+def test_prune_removes_only_old_plays():
+    play("vieja", n=2)
+    play("nueva")
+    with closing(library.connect()) as conn, conn:
+        conn.execute("UPDATE plays SET played_at = datetime('now', '-800 days') WHERE video_id = 'vieja'")
+
+    assert history.prune(days=730) == 2
+    assert [r["video_id"] for r in history.recent()] == ["nueva"]
+
+
 def test_counts_as_play_needs_real_listening():
     assert not history.counts_as_play(5, 200)
     assert history.counts_as_play(30, 200)

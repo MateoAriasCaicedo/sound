@@ -31,11 +31,15 @@ class HealthPage(Page):
                                    self.open_data, self.fonts["body"], variant="secondary",
                                    min_width=190)
         self.btn_data.grid(row=0, column=1, padx=(int(8 * self.k), 0), sticky="w")
+        self.btn_music = PillButton(self.buttons, self.app.anim, self.k, "Abrir carpeta de música",
+                                    self.open_music, self.fonts["body"], variant="secondary",
+                                    min_width=190)
+        self.btn_music.grid(row=0, column=2, padx=(int(8 * self.k), 0), sticky="w")
         self.btn_log = PillButton(self.buttons, self.app.anim, self.k, "Abrir registro",
                                   self.open_log, self.fonts["body"], variant="ghost",
                                   min_width=125)
-        self.btn_log.grid(row=0, column=3, padx=(int(18 * self.k), 0), sticky="e")
-        self.buttons.columnconfigure(2, weight=1)
+        self.btn_log.grid(row=0, column=4, padx=(int(18 * self.k), 0), sticky="e")
+        self.buttons.columnconfigure(3, weight=1)
 
         self.restyle()
 
@@ -49,7 +53,7 @@ class HealthPage(Page):
         self._pal = pal
         self.rows.configure(bg=pal["bg"])
         self.buttons.configure(bg=pal["bg"])
-        for button in (self.btn_check, self.btn_data, self.btn_log):
+        for button in (self.btn_check, self.btn_data, self.btn_music, self.btn_log):
             button.restyle(bg=pal["bg"], fg=pal["fg"], dim=pal["dim"], faint=pal["faint"],
                            accent=pal["accent"], on_accent=pal["accent_fg"],
                            danger=pal["danger"])
@@ -89,6 +93,9 @@ class HealthPage(Page):
     def open_data(self) -> None:
         health.open_path(config.DATA_DIR)
 
+    def open_music(self) -> None:
+        health.open_path(config.MUSIC_DIR)
+
     def open_log(self) -> None:
         health.open_path(config.LOG_PATH)
 
@@ -107,7 +114,8 @@ class HealthPage(Page):
                               anchor="w", justify="left")
             detail.grid(row=index, column=1, sticky="w", padx=(int(14 * self.k), 0),
                         pady=(0, int(7 * self.k)))
-            dot = tk.Label(self.rows, text="●", font=self.fonts["body"])
+            symbol = {"ok": "✓", "warn": "!", "fail": "✗"}.get(check["status"], "●")
+            dot = tk.Label(self.rows, text=symbol, font=self.fonts["strong"])
             dot.grid(row=index, column=2, sticky="e", padx=(int(8 * self.k), 0),
                      pady=(0, int(7 * self.k)))
             self._paint_row(name, detail, dot, check["status"])
