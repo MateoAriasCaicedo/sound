@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 1.1.0 — 2026-11-06
 
 ### Búsqueda
 - La búsqueda en YouTube Music es **mucho más rápida**: empieza a buscar a las tres letras,
