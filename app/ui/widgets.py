@@ -13,7 +13,7 @@ from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageTk
 
-from ..core.waveform import resample
+from ..core.waveform import level_at, resample
 from .anim import Animator, ease_in_out, ease_out
 from .icons import icon_mask
 from .theme import _rgb, blend, seed_color
@@ -73,6 +73,30 @@ def elide(font: tkfont.Font, text: str, width: int) -> str:
         else:
             hi = mid - 1
     return text[:lo].rstrip() + "…"
+
+
+def touchpad_deltas(event) -> tuple[int, int]:
+    """Desplazamiento (x, y) de un evento `<TouchpadScroll>` de Tk 9.
+
+    Tk guarda ambos ejes en el campo `delta` como dos enteros de 16 bits con signo:
+    x en los 16 bits altos e y en los bajos. El gesto de dos dedos llega muchas veces por
+    segundo, así que quien lo use debe desplazarse en píxeles, no de golpe por unidades.
+    """
+    value = int(getattr(event, "delta", 0)) & 0xFFFFFFFF
+    dx, dy = value >> 16, value & 0xFFFF
+    if dx >= 0x8000:
+        dx -= 0x10000
+    if dy >= 0x8000:
+        dy -= 0x10000
+    return dx, dy
+
+
+def bind_touchpad(widget, handler, add: bool = False) -> None:
+    """Enlaza el gesto de dos dedos si el Tk instalado lo soporta (8.7/9.0)."""
+    try:
+        widget.bind("<TouchpadScroll>", handler, add="+" if add else None)
+    except tk.TclError:
+        pass  # Tk antiguo: la rueda normal sigue funcionando
 
 
 def _layer(mask: Image.Image, color: str) -> Image.Image:
@@ -1169,10 +1193,10 @@ class Equalizer(tk.Canvas):
     redibujar la tabla entera, demasiado lento para animarla.
     """
 
-    def __init__(self, master, anim: Animator, k: float, playing) -> None:
+    def __init__(self, master, anim: Animator, k: float, playing, level=None) -> None:
         self.size = int(16 * k)
         super().__init__(master, width=self.size, height=self.size, highlightthickness=0, bd=0)
-        self.anim, self.playing = anim, playing
+        self.anim, self.playing, self.level = anim, playing, level
         self.color = "#ffffff"
         self._painted = _Painted(self)
         self.on_paint = None  # para recolocarlo si la fila se movió
@@ -1201,8 +1225,15 @@ class Equalizer(tk.Canvas):
         img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         bw = s / 5
+        pump = 0.0
+        if now is not None and self.level is not None:
+            try:
+                pump = max(0.0, min(1.0, float(self.level())))
+            except Exception:  # noqa: BLE001 - una lectura rota no debe parar la animación
+                pump = 0.0
         for i in range(3):
-            level = 0.3 if now is None else 0.45 + 0.45 * math.sin(now * (6.3 + i * 1.7) + i * 2.1)
+            level = (0.15 + (0.35 + 0.45 * pump) * (0.5 + 0.5 * math.sin(
+                now * (6.3 + i * 1.7) + i * 2.1))) if now is not None else 0.3
             x = bw * 0.5 + i * bw * 1.5
             d.rounded_rectangle((x, s * (0.92 - 0.8 * level), x + bw, s * 0.92), radius=bw / 2,
                                 fill=self.color)
@@ -1234,6 +1265,7 @@ class WaveSeek(tk.Canvas):
         self.levels: list[float] | None = None
         self.value = self.shown = 0.0
         self.energy = 0.0
+        self.pulse = 0.0  # nivel real bajo el cabezal, con subida rápida y bajada lenta
         self.morph, self._m0 = 1.0, 0.0
         self.bars: list[int] = []
         self.a: list[float] = []
@@ -1386,6 +1418,13 @@ class WaveSeek(tk.Canvas):
             moving = True
         else:
             self.energy = target
+        pulse_target = level_at(self.levels, self.shown / 1000) if self.energy > 0 else 0.0
+        if abs(self.pulse - pulse_target) > 0.002:
+            rate = 0.35 if pulse_target > self.pulse else 0.07  # ataque rápido, caída lenta
+            self.pulse += (pulse_target - self.pulse) * rate
+            moving = True
+        else:
+            self.pulse = pulse_target
         gap = self.value - self.shown
         if abs(gap) > 0.3 and not reduced:
             self.shown += gap * 0.3
@@ -1421,7 +1460,11 @@ class WaveSeek(tk.Canvas):
             level = self._level(i, n)
             if energy > 0:
                 near = (i - head) / 8
-                level *= 1 + energy * exp(-near * near) * (0.24 + 0.2 * sin(now * 6 + self.phase[i]))
+                # sin niveles reales se mantiene el rizo decorativo de siempre; con ellos, el
+                # cabezal crece en los pasajes fuertes y se calma en los suaves
+                body = 0.10 + 0.36 * self.pulse if self.levels else 0.24
+                level *= 1 + energy * exp(-near * near) * (
+                    body + 0.12 * sin(now * 6 + self.phase[i]))
             h = max(low, min(float(H), level * H))
             if abs(h - self.last[i]) >= 0.5:
                 self.last[i] = h
@@ -1465,6 +1508,7 @@ class RowList(tk.Canvas):
         self.items: list[dict] = []
         self.pos: list[tuple[int, int]] = []
         self.text_ids: list[int] = []
+        self.sub_ids: list[int | None] = []
         self.sel: set[int] = set()
         self.anchor: int | None = None
         self.hovered: int | None = None
@@ -1487,6 +1531,7 @@ class RowList(tk.Canvas):
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", lambda e: self._set_hover(None))
         self.bind("<MouseWheel>", self._wheel)
+        bind_touchpad(self, self._touchpad)
         self.bind("<Up>", lambda e: self._key(-1))
         self.bind("<Down>", lambda e: self._key(1))
         if on_move is not None:
@@ -1546,11 +1591,14 @@ class RowList(tk.Canvas):
             return it["color"]
         return self.c["fg"] if i in self.sel or i == self.hovered else self.c["dim"]
 
+    def _sub_color(self, i: int) -> str:
+        return self.c["dim"] if i in self.sel or i == self.hovered else self.c["faint"]
+
     def _layout(self) -> None:
         self.delete("all")
         self._sel_items.clear()
         self._hover_item = None
-        self.pos, self.text_ids = [], []
+        self.pos, self.text_ids, self.sub_ids = [], [], []
         width = self._width or self.winfo_reqwidth()
         pad = self.pad
         y = int(2 * self.k)
@@ -1567,9 +1615,20 @@ class RowList(tk.Canvas):
                 room -= self.fonts["small"].measure(right) + pad
                 self.create_text(width - pad, y + h // 2, anchor="e", text=right,
                                  font=self.fonts["small"], fill=self.c["faint"])
-            self.text_ids.append(self.create_text(
-                pad, y + h // 2, anchor="w", text=elide(font, it["text"], room), font=font,
-                fill=self._text_color(i)))
+            sub_text = None if hdr else it.get("sub")
+            if sub_text:
+                self.text_ids.append(self.create_text(
+                    pad, y + h * 0.32, anchor="w", text=elide(font, it["text"], room),
+                    font=font, fill=self._text_color(i)))
+                self.sub_ids.append(self.create_text(
+                    pad, y + h * 0.70, anchor="w",
+                    text=elide(self.fonts["small"], sub_text, room),
+                    font=self.fonts["small"], fill=self._sub_color(i)))
+            else:
+                self.text_ids.append(self.create_text(
+                    pad, y + h // 2, anchor="w", text=elide(font, it["text"], room), font=font,
+                    fill=self._text_color(i)))
+                self.sub_ids.append(None)
             y += h
         self.total = y + int(8 * self.k)
         self.configure(scrollregion=(0, 0, width, self.total))
@@ -1589,6 +1648,8 @@ class RowList(tk.Canvas):
             self.tag_lower(self._sel_items[i])
         for i, tid in enumerate(self.text_ids):
             self.itemconfigure(tid, fill=self._text_color(i))
+            if i < len(self.sub_ids) and self.sub_ids[i] is not None:
+                self.itemconfigure(self.sub_ids[i], fill=self._sub_color(i))
         if slide_from is not None and len(self.sel) == 1 and slide_from < len(self.pos):
             i = next(iter(self.sel))
             item = self._sel_items[i]
@@ -1604,6 +1665,8 @@ class RowList(tk.Canvas):
         for j in (old, i):
             if j is not None and j < len(self.text_ids):
                 self.itemconfigure(self.text_ids[j], fill=self._text_color(j))
+                if j < len(self.sub_ids) and self.sub_ids[j] is not None:
+                    self.itemconfigure(self.sub_ids[j], fill=self._sub_color(j))
         if self._hover_item is not None:
             self.delete(self._hover_item)
             self._hover_item = None
@@ -1757,6 +1820,15 @@ class RowList(tk.Canvas):
 
     def _wheel(self, e) -> str:
         self._scroll_to(self._target() - e.delta / 120 * 3 * self.rh)
+        return "break"
+
+    def _touchpad(self, e) -> str:
+        """Gesto de dos dedos: en Tk 9 llega aparte y en píxeles (no en «clics» de rueda)."""
+        _dx, dy = touchpad_deltas(e)
+        if dy:
+            limit = max(0, self.total - self.winfo_height())
+            self.off = self._goal = max(0.0, min(float(limit), self.off - dy))
+            self.yview_moveto(self.off / max(1, self.total))
         return "break"
 
     def _target(self) -> float:

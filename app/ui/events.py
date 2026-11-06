@@ -7,7 +7,7 @@ import queue
 import time
 from tkinter import messagebox
 
-from ..core import config, library
+from ..core import config, library, waveform
 from ..core import log as _log
 
 log = _log.get("ui.events")
@@ -33,15 +33,24 @@ class EventLoopMixin:
                 kind = ev[0]
                 if kind == "results":
                     if ev[1] == self.search_id:
+                        final = ev[5] if len(ev) > 5 else True
                         self.searching = False
                         self.remote, self.remote_src, self.remote_q = ev[2], ev[3], ev[4]
                         self.refresh_view()
-                        self._fade_rows()
+                        if final:
+                            self._fade_rows()
                         if not self.yt_genres:  # la conexión volvió: carga los géneros
                             self._load_yt_genres()
                         # resuelve ya las URLs de los primeros resultados: al dar play, sin espera
                         self._resolve_ahead(
                             [t["video_id"] for t in self.rows if self._is_remote(t)][:AHEAD_RESULTS])
+                    elif ev[3] == "songs":
+                        # Llegó la respuesta de un prefijo de lo que se escribe: úsala como
+                        # pre-resultados en vez de tirarla. La definitiva la sustituirá.
+                        current = self.query.get().strip()
+                        if current and self._related_query(current, ev[4]):
+                            self._show_pre_results(current)
+                            self.refresh_view()
                 elif kind == "remote_error":
                     if ev[1] == self.search_id:
                         self.searching = False
@@ -73,10 +82,18 @@ class EventLoopMixin:
                 elif kind == "resolved":
                     self._prepare(ev[1])
                 elif kind == "wave":
+                    self._energy_cache[ev[1]] = waveform.summary(ev[2])["energy"]
                     self.scale.set_levels(ev[1], ev[2])
                 elif kind == "cover":
                     if ev[1] == self.play_token:
                         self._set_cover(ev[2])
+                elif kind == "preview_cover":
+                    self._apply_preview_cover(ev[1], ev[2])
+                elif kind == "lyrics":
+                    self._apply_lyrics(ev[1], ev[3])
+                elif kind == "thumb":
+                    self._thumbs_pending.discard(ev[1])
+                    self.grid.set_cover(ev[1], ev[2])
                 elif kind == "queue_paused":
                     self._queue_paused_changed(ev[1])
                 elif kind == "disk":
@@ -157,6 +174,7 @@ class EventLoopMixin:
                         if track:  # ya hay audio que medir: su onda crece aquí
                             self.waves.want(ev[1], track["path"],
                                             urgent=ev[1] == self.playing_vid)
+                        self.grid.forget_cover(ev[1])
                         self._set_state(ev[1], "✓")
                         self._retag(ev[1])
                         msg = f"Descargada: {ev[2]}"
@@ -165,6 +183,7 @@ class EventLoopMixin:
                         iid = self.vid_iid.get(ev[1])
                         if iid is not None and self.tree.exists(iid):
                             self.tree.set(iid, "state", "☁")
+                        self.grid.set_state(ev[1], "☁")
                         continue
                     else:
                         self._set_state(ev[1], "✗")

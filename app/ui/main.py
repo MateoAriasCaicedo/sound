@@ -7,13 +7,13 @@ import threading
 import time
 import tkinter as tk
 import traceback
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from ..core import (
     config,
+    covers,
     duplicates,
     favorites,
     health,
@@ -25,12 +25,15 @@ from ..core import (
 )
 from ..core import cookies as cookies_store
 from ..core import log as _log
+from ..core import lyrics as lyrics_store
 from ..core.filters import fold
 from . import prefs, session
 from .anim import Animator, ease_in_out
+from .cover_grid import CoverGrid
 from .downloads import DownloadsController
 from .events import AHEAD_RESULTS, EventLoopMixin
 from .library_ui import LibraryMixin
+from .lyrics_view import LyricsView
 from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
 from .playqueue import PlayQueue
@@ -59,6 +62,8 @@ from .widgets import (
     StatusLine,
     TextButton,
     WaveSeek,
+    bind_touchpad,
+    touchpad_deltas,
     ui_fonts,
 )
 
@@ -75,6 +80,10 @@ STALL_S = 8      # segundos sin avanzar (sin internet) antes de saltar a la cola
 BACKUP_AFTER_MS = 10_000  # una canción en streaming se guarda tras escucharla este tiempo
 AUTO_UPDATE_DELAY_MS = 20_000       # dejar arrancar la ventana antes de buscar actualizaciones
 AUTO_UPDATE_RETRY_MS = 10 * 60_000  # si hay descargas en curso, reintentar más tarde
+SEARCH_DEBOUNCE_MS = 200  # búsqueda automática en YT Music al dejar de escribir
+SEARCH_MIN_CHARS = 3      # menos que esto no merece una petición
+SEARCH_FIRST_PAGE = 20    # lo que se pide primero: una sola petición, resultados ya
+SEARCH_LIMIT = 40         # el resto se completa luego, sin hacer esperar
 COLS = (("title", "Título", 280), ("artist", "Artista", 170), ("album", "Álbum", 170),
         ("dur", "Dur.", 50), ("state", "", 84))
 
@@ -96,6 +105,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.pq = PlayQueue(self._is_remote, lambda: self.online)
         self.dl = DownloadsController(self)
         self.title("Sound")
+        self._set_app_icon()
         self.attributes("-alpha", 0.0)  # entra con un fundido al terminar de construirse
         self.k = max(1.0, self.winfo_fpixels("1i") / 96)  # escala de la pantalla
         self.geometry(f"{int(1120 * self.k)}x{int(720 * self.k)}")
@@ -104,6 +114,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.q: queue.Queue = queue.Queue()
         # hilos fijos para reproducir: conservan su yt-dlp ya preparado y no esperan tras las precargas
         self.play_pool = ThreadPoolExecutor(2)
+        # portadas de la cuadrícula: pocas a la vez y solo las visibles
+        self.thumb_pool = ThreadPoolExecutor(2, thread_name_prefix="cover")
+        self._thumbs_pending: set[str] = set()
         self.library: list[dict] = []
         self.lib_by_id: dict[str, dict] = {}
         self._search_cache: dict[str, str] = {}  # texto normalizado por canción, para buscar sin repetir
@@ -122,6 +135,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.remote_src: str | None = None  # "songs" | "genre" | "genres"
         self.remote_q = ""
         self.searching = False
+        self._remote_inflight: tuple[str, float] | None = None  # búsqueda de YT en curso
         self._qdebounce = None
         self.sort: tuple[str, bool] | None = None
         self.pages: dict[str, object] = {}  # páginas integradas creadas al abrirlas
@@ -136,6 +150,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.seeking = False
         self._cover_data: bytes | None = None
         self._ambient: str | None = None  # color de la canción que suena: tiñe la ventana
+        self._preview_vid: str | None = None  # próxima canción cuyo color ya se está anticipando
+        self._energy_cache: dict[str, float | None] = {}
         self.scheme: dict[str, str] = {}
         self.dl_paused = False
         self.disk_level = "ok"  # ok | low (una descarga a la vez) | critical (en pausa)
@@ -143,6 +159,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._disk_dialog_shown = False
         self.damaged: set[str] = set()  # archivos locales incompletos: se conservan y se pueden rehacer
         self.prefs = prefs.load()
+        self.view_mode = "grid" if str(self.prefs.get("view", "list")).lower() == "grid" \
+            else "list"
         self.cookies = str(self.prefs.get("cookies") or config.COOKIES_FROM_BROWSER or "").strip().lower()
         # Descargas y streaming comparten el navegador: se aplica antes de resolver nada.
         cookies_store.configure(self.cookies)
@@ -168,6 +186,13 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.queue_win: tk.Frame | None = None  # el panel «A continuación», si está abierto
         self.queue_lb: RowList | None = None
         self.queue_map: list[tuple[str, int]] = []
+        self.queue_why: dict[str, str] = {}  # por qué la cola automática eligió cada canción
+        self.radio_seed: dict | None = None  # canción desde la que se pidieron las similares
+        self.drawer_mode = "queue"  # queue | lyrics
+        self.lyrics_enabled = bool(self.prefs.get("lyrics", False))
+        self.var_lyrics = tk.BooleanVar(value=self.lyrics_enabled)
+        self._lyrics_vid: str | None = None
+        self._lyrics_payload: dict | None = None
         # transiciones entre canciones
         self.xfade_ms = int(self.prefs.get("xfade", 4000))  # 0 = sin crossfade (gapless)
         self.normalize = bool(self.prefs.get("normalize", False))  # volumen por canción
@@ -199,16 +224,20 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._restore_session()
         self.waves.sweep((t["video_id"], t["path"]) for t in self.library)
         self._load_yt_genres()
+        threading.Thread(target=self._warm_search, daemon=True, name="calentar-busqueda").start()
         threading.Thread(target=self.dl.start_service, daemon=True).start()
         self.bind("<Control-g>", lambda e: (self.open_prompt(), "break")[1])  # «Música por frase»
         self.bind("<Control-l>", lambda e: (self.toggle_like(), "break")[1])  # Me gusta
         self.bind("<Control-f>", lambda e: (self.search_box.entry.focus_set(), "break")[1])
         self.bind("<Control-a>", self._select_all)  # todas las canciones de la vista
+        self.bind("<Control-Shift-L>", self._toggle_view_key)
         self.bind("<Control-comma>", lambda e: (self.open_settings(), "break")[1])  # ajustes
         self.bind("<F1>", lambda e: (self.open_settings(), "break")[1])  # ayuda y atajos
         self.bind("<Control-m>", self._toggle_mute)  # silenciar
         self.bind("<Control-Up>", lambda e: self._volume_step(5))
         self.bind("<Control-Down>", lambda e: self._volume_step(-5))
+        self.bind("<MouseWheel>", self._wheel_anywhere, add="+")
+        bind_touchpad(self, self._touchpad_anywhere, add=True)
         self.bind("<Escape>", self._escape)
         self.play_pool.submit(self._warm_up)
         threading.Thread(target=self._net_loop, daemon=True).start()
@@ -222,6 +251,26 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                         done=lambda: self.attributes("-alpha", 1.0))
 
     # ---------- construcción ----------
+    def _set_app_icon(self) -> None:
+        """Icono de la ventana y de los diálogos (sin él Tk pondría el de Python/Tk)."""
+        icon = config.icon_path()
+        if icon is None:
+            return
+        try:
+            self.iconbitmap(str(icon))
+            self.iconbitmap(default=str(icon))  # también para los diálogos
+            return
+        except tk.TclError as exc:  # .ico no soportado o archivo ilegible
+            _log.failure(log, "no se pudo usar el icono .ico", exc)
+        png = icon.with_suffix(".png")
+        try:
+            if png.exists():
+                self._icon_photo = tk.PhotoImage(file=str(png))
+                self.iconphoto(False, self._icon_photo)  # esta ventana
+                self.iconphoto(True, self._icon_photo)   # futuros diálogos
+        except Exception as exc:  # noqa: BLE001 - el icono es cosmético
+            _log.failure(log, "no se pudo usar el icono .png", exc)
+
     def _build(self) -> None:
         k = self.k
         self.anim = Animator(self)
@@ -241,8 +290,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         top.columnconfigure(0, minsize=list_x)
         top.columnconfigure(2, weight=1)
         self.top = top
-        self.mark = tk.Label(top, text="Sound", font=f["mark"], anchor="w")
+        self._mark_hover = False
+        self.mark = tk.Label(top, text="Sound", font=f["mark"], anchor="w", cursor="hand2")
         self.mark.grid(row=0, column=0, sticky="w", padx=(int(24 * k), 0))
+        self.mark.bind("<Button-1>", self.go_home)
+        self.mark.bind("<Enter>", self._mark_enter)
+        self.mark.bind("<Leave>", self._mark_leave)
         self.query = tk.StringVar()
         self.search_box = SearchBox(top, self.anim, k, f["body"], self.query,
                                     "Buscar canciones, artistas o álbumes…")
@@ -266,15 +319,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.btn_prompt = IconButton(top, self.anim, k, "note", self.open_prompt,
                                      tip="Música por frase (Ctrl+G)")
         self.btn_prompt.grid(row=0, column=6, padx=(int(2 * k), 0))
-        self.btn_more = IconButton(top, self.anim, k, "more", self.open_actions,
-                                   tip="Más acciones de la biblioteca")
-        self.btn_more.grid(row=0, column=8, padx=(int(2 * k), 0))
         self.btn_settings = IconButton(top, self.anim, k, "settings", self.open_settings,
                                        tip="Ajustes y atajos (Ctrl+,)")
-        self.btn_settings.grid(row=0, column=9, padx=(int(2 * k), 0))
+        self.btn_settings.grid(row=0, column=10, padx=(int(2 * k), int(14 * k)))
         self.btn_theme = IconButton(top, self.anim, k, "theme", self.toggle_theme,
                                     tip="Tema claro u oscuro")
-        self.btn_theme.grid(row=0, column=10, padx=(int(2 * k), int(14 * k)))
+        self.btn_theme.grid(row=0, column=9, padx=(int(2 * k), 0))
 
         # título de la vista y línea de estado, sobre un degradado teñido por la canción
         self.header = Header(self, self.anim, k, f, list_x)
@@ -304,12 +354,24 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         # la rueda también desplaza la lista si el puntero cae en el margen o en la barra
         for w in (side, self.sb_genres):
             w.bind("<MouseWheel>", self.genres._wheel)
+            bind_touchpad(w, self.genres._touchpad)
 
         mid = tk.Frame(content)
         mid.grid(row=0, column=1, sticky="nsew", padx=(0, int(10 * k)))
-        mid.rowconfigure(0, weight=1)
+        mid.rowconfigure(1, weight=1)
         mid.columnconfigure(0, weight=1)
         self.mid = mid
+        # vista de lista o cuadrícula y acciones de la biblioteca: arriba a la derecha
+        self.list_tools = tk.Frame(mid)
+        self.list_tools.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.btn_more = IconButton(self.list_tools, self.anim, k, "tools", self.open_actions,
+                                   tip="Más acciones de la biblioteca", size=32, glyph=18)
+        self.btn_more.pack(side="right", padx=(0, int(6 * k)), pady=(int(2 * k), int(2 * k)))
+        self.btn_view = IconButton(
+            self.list_tools, self.anim, k, "grid", self.toggle_view_mode, size=32, glyph=18,
+            tip=lambda: "Vista de lista (Ctrl+Shift+L)"
+            if self.view_mode == "grid" else "Vista de cuadrícula (Ctrl+Shift+L)")
+        self.btn_view.pack(side="right", padx=(0, int(2 * k)), pady=(int(2 * k), int(2 * k)))
         self.tree = ttk.Treeview(mid, columns=[c[0] for c in COLS], selectmode="extended")
         # la columna inicial solo lleva el ecualizador de la fila que suena
         self.tree.column("#0", width=int(30 * k), minwidth=int(30 * k), stretch=False)
@@ -320,8 +382,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                              stretch=c in ("title", "artist", "album"))
         self.sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=self._tree_scrolled)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        self.sb.grid(row=0, column=1, sticky="ns")
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        self.sb.grid(row=1, column=1, sticky="ns")
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", self._on_double)
         self.tree.bind("<Return>", self._on_double)
@@ -329,6 +391,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.tree.bind("<Delete>", lambda e: self.delete_selected())
         self.tree.bind("<Motion>", self._row_hover)
         self.tree.bind("<Leave>", lambda e: self._set_hover_row(None))
+        self.grid = CoverGrid(mid, self.anim, k, f, on_select=self._grid_selected,
+                              on_activate=self.play_index, on_context=self._grid_context,
+                              on_need_cover=self._request_thumb)
+        self.grid.grid(row=1, column=0, sticky="nsew")
+        self.grid.grid_remove()
+        self.grid.bind("<Delete>", lambda e: self.delete_selected())
         self.empty = tk.Label(mid, font=f["body"])
 
         # panel «A continuación»: vive fuera de la vista y entra deslizándose
@@ -341,11 +409,20 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.drawer_title.pack(fill="x", padx=int(16 * k), pady=(int(14 * k), 0))
         self.drawer_sub = tk.Label(self.drawer, font=f["small"], anchor="w")
         self.drawer_sub.pack(fill="x", padx=int(16 * k), pady=(0, int(8 * k)))
+        self.drawer_tabs = tk.Frame(self.drawer)
+        self.drawer_tabs.pack(fill="x", padx=int(16 * k), pady=(0, int(8 * k)))
+        self.tab_queue = tk.Label(self.drawer_tabs, text="Cola", font=f["small"], cursor="hand2")
+        self.tab_lyrics = tk.Label(self.drawer_tabs, text="Letra", font=f["small"], cursor="hand2")
+        self.tab_queue.pack(side="left")
+        self.tab_lyrics.pack(side="left", padx=(int(14 * k), 0))
+        self.tab_queue.bind("<Button-1>", lambda _e: self._set_drawer_mode("queue"))
+        self.tab_lyrics.bind("<Button-1>", lambda _e: self._set_drawer_mode("lyrics"))
+        self.lyrics_view = LyricsView(self.drawer, k, f)
         self.drawer_hint = tk.Label(
             self.drawer, text="Arrastra para ordenar · clic derecho o Supr para quitar",
             font=f["small"], anchor="w")
         self.drawer_hint.pack(fill="x", padx=int(16 * k), pady=(0, int(8 * k)))
-        self.drawer_list = RowList(self.drawer, self.anim, k, f, multi=False,
+        self.drawer_list = RowList(self.drawer, self.anim, k, f, multi=False, row=42,
                                    on_activate=lambda i: self._queue_jump(),
                                    on_move=self._queue_move, on_context=self._queue_context)
         self.drawer_list.pack(fill="both", expand=True, padx=int(4 * k))
@@ -360,7 +437,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             on_press=lambda: setattr(self, "seeking", True),
             on_release=lambda: self._seek_release(None))
         self.scale.grid(row=3, column=0, sticky="ew")
-        self.eq = Equalizer(mid, self.anim, k, playing)
+        self.eq = Equalizer(mid, self.anim, k, playing, level=lambda: self.scale.pulse)
         self.eq.on_paint = self._place_eq
 
         band = tk.Frame(self)
@@ -414,7 +491,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
         self.band_frames = (band, bar, left, mid_bar, right)
         self.top_icons = (self.btn_import, self.btn_prompt, self.btn_downloads,
-                          self.btn_more, self.btn_settings, self.btn_theme)
+                          self.btn_theme, self.btn_settings)
         self.bar_icons = (self.btn_shuffle, self.btn_prev, self.btn_next, self.btn_repeat,
                           self.vol_icon, self.btn_queue, self.btn_xfade, self.btn_auto)
         self.vol.set(self.prefs.get("vol", 80))
@@ -425,6 +502,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def _place_eq(self) -> None:
         """Coloca el ecualizador sobre la fila que suena, con el fondo que tenga esa fila."""
+        if self.view_mode == "grid":
+            # la cuadrícula dibuja su propio ecualizador encima de la portada
+            self.eq.place_forget()
+            self._eq_spot = None
+            return
         iid = self.vid_iid.get(self.playing_vid) if self.playing_vid else None
         box = self.tree.bbox(iid, "#0") if iid is not None and self.tree.exists(iid) else ""
         if not box:
@@ -441,6 +523,253 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         if spot != self._eq_spot:  # que la tabla repinte el hueco que deja: evita un rastro
             self._eq_spot = spot
             self.tree.tag_configure("hover", background=p["hover"])
+
+    # ---------- vista de lista o cuadrícula ----------
+    def _toggle_view_key(self, _e=None) -> str | None:
+        # mientras se escribe, Ctrl+Shift+L no debe cambiar la vista
+        if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):
+            return None
+        self.toggle_view_mode()
+        return "break"
+
+    def toggle_view_mode(self) -> None:
+        self._set_view("list" if self.view_mode == "grid" else "grid")
+        self.save_prefs()
+
+    def _set_view(self, mode: str) -> None:
+        self.view_mode = "grid" if mode == "grid" else "list"
+        if self.view_mode == "grid":
+            self.tree.grid_remove()
+            self.tree.configure(yscrollcommand=lambda *_a: None)
+            self.grid.grid(row=1, column=0, sticky="nsew")
+            self.sb.configure(command=self._grid_scrollbar)
+            self.grid.configure(yscrollcommand=self._grid_scrolled)
+            self.grid.set_context(liked=self.liked, damaged=self.damaged, states=self.dl.state,
+                                  view_kind=self.view_kind)
+            self.grid.set_items(self.rows)
+            self.grid.set_playing(self.playing_vid)
+            self.grid.select(self.tree.selection())
+        else:
+            self.grid.grid_remove()
+            self.grid.configure(yscrollcommand=lambda *_a: None)
+            self.tree.grid(row=1, column=0, sticky="nsew")
+            self.sb.configure(command=self.tree.yview)
+            self.tree.configure(yscrollcommand=self._tree_scrolled)
+            self._tree_scrolled(*self.tree.yview())
+        self.btn_view.set_icon("grid" if self.view_mode == "list" else "list")
+        self._place_eq()
+        self.empty.lift()
+
+    def _grid_scrolled(self, first: str, last: str) -> None:
+        """La barra de la cuadrícula solo aparece si hay algo que desplazar."""
+        self.sb.set(first, last)
+        if float(first) <= 0 and float(last) >= 1:
+            self.sb.grid_remove()
+        else:
+            self.sb.grid()
+
+    def _grid_scrollbar(self, *args) -> None:
+        self.grid.scrollbar(*args)
+
+    def _grid_selected(self, iids) -> None:
+        """La cuadrícula cambió la selección: se refleja en el Treeview, que manda."""
+        if iids:
+            self.tree.selection_set(tuple(iids))
+        else:
+            self.tree.selection_remove(*self.tree.selection())
+        self._on_select()
+
+    def _grid_context(self, i: int, x_root: int, y_root: int) -> None:
+        self._context_at(str(i), x_root, y_root)
+
+    def _request_thumb(self, track: dict) -> bool:
+        """Pide una portada en segundo plano; el resultado vuelve por la cola de eventos."""
+        vid = track.get("video_id")
+        if not vid:
+            return False
+        if vid in self._thumbs_pending:
+            return True
+        if len(self._thumbs_pending) >= 10:  # la cuadrícula reintenta al repintar
+            return False
+        self._thumbs_pending.add(vid)
+
+        def work() -> None:
+            image = None
+            try:
+                data = covers.load(track)
+                if data:
+                    from PIL import Image
+
+                    image = Image.open(io.BytesIO(data)).convert("RGB")
+                    image.thumbnail((512, 512), Image.LANCZOS)
+            except Exception as exc:  # noqa: BLE001 - sin portada se usa el degradado
+                _log.failure(log, f"no se pudo leer la portada de {vid}", exc)
+                image = None
+            self.q.put(("thumb", vid, image))
+
+        try:
+            self.thumb_pool.submit(work)
+        except RuntimeError:  # la ventana se está cerrando
+            self._thumbs_pending.discard(vid)
+            return False
+        return True
+
+    # ---------- rueda del ratón ----------
+    def _wheel_anywhere(self, e) -> str | None:
+        """La rueda mueve lo que hay bajo el puntero, aunque el foco esté en otro control.
+
+        Tk entrega la rueda al control que la recibe: si el foco está en el buscador, la lista
+        no se enteraría. Este enrutador busca el control desplazable bajo el ratón y lo mueve.
+        """
+        target = self.winfo_containing(e.x_root, e.y_root)
+        if target is None:
+            return None
+        if target is e.widget and isinstance(
+                target, (ttk.Treeview, tk.Canvas, tk.Listbox, tk.Text)):
+            return None  # ese control ya tiene su propio desplazamiento
+        handler = self._wheel_target(target)
+        if handler is None:
+            return None
+        handler(e)
+        return "break"
+
+    def _wheel_target(self, target):
+        """Devuelve el manejador de rueda del control desplazable que contiene `target`."""
+        w = target
+        while w is not None:
+            if w is self.grid:
+                return self.grid._wheel
+            if w is self.genres or w is self.side:
+                return self.genres._wheel
+            if w is self.drawer_list or (w is self.drawer and self.queue_win is not None):
+                return self.drawer_list._wheel
+            if w is self.mid:
+                return self.grid._wheel if self.view_mode == "grid" else self._tree_wheel
+            if isinstance(w, ttk.Treeview):
+                return lambda e, tree=w: self._wheel_view(tree, e)
+            if isinstance(w, ttk.Scrollbar):
+                sibling = self._scrollbar_sibling(w)
+                if sibling is self.grid:
+                    return self.grid._wheel
+                if isinstance(sibling, RowList):
+                    return sibling._wheel
+                if sibling is not None:
+                    return lambda e, s=sibling: self._wheel_view(s, e)
+            w = w.master
+        page = self.active_page
+        if page is not None and self._inside(target, page):
+            handler = getattr(page, "_wheel", None)
+            if callable(handler):
+                return handler
+        return None
+
+    def _tree_wheel(self, e) -> str:
+        return self._wheel_view(self.tree, e)
+
+    @staticmethod
+    def _wheel_steps(e) -> int:
+        """Unidades de rueda; las ruedas de alta resolución mandan deltas menores de 120."""
+        steps = int(e.delta / 120)
+        if steps == 0 and e.delta:
+            steps = 1 if e.delta > 0 else -1
+        return -steps
+
+    @classmethod
+    def _wheel_view(cls, widget, e) -> str:
+        try:
+            widget.yview_scroll(cls._wheel_steps(e), "units")
+        except tk.TclError:  # el control ya no existe
+            pass
+        return "break"
+
+    # ---------- touchpad (Tk 9: dos dedos = <TouchpadScroll>, no <MouseWheel>) ----------
+    def _touchpad_anywhere(self, e) -> str | None:
+        """El gesto de dos dedos mueve lo que hay bajo el puntero, como la rueda."""
+        target = self.winfo_containing(e.x_root, e.y_root)
+        if target is None:
+            return None
+        if target is e.widget and isinstance(
+                target, (ttk.Treeview, tk.Canvas, tk.Listbox, tk.Text)):
+            return None  # los controles estándar de Tk 9 ya lo manejan solos
+        handler = self._touchpad_target(target)
+        if handler is None:
+            return None
+        handler(e)
+        return "break"
+
+    def _touchpad_target(self, target):
+        w = target
+        while w is not None:
+            if w is self.grid:
+                return self.grid._touchpad
+            if w is self.genres or w is self.side:
+                return self.genres._touchpad
+            if w is self.drawer_list or (w is self.drawer and self.queue_win is not None):
+                return self.drawer_list._touchpad
+            if w is self.mid:
+                return self.grid._touchpad if self.view_mode == "grid" else self._tree_touchpad
+            if isinstance(w, ttk.Treeview):
+                return lambda e, tree=w: self._touchpad_view(tree, e)
+            if isinstance(w, ttk.Scrollbar):
+                sibling = self._scrollbar_sibling(w)
+                if sibling is self.grid:
+                    return self.grid._touchpad
+                if isinstance(sibling, RowList):
+                    return sibling._touchpad
+                if sibling is not None:
+                    return lambda e, s=sibling: self._touchpad_view(s, e)
+            w = w.master
+        page = self.active_page
+        if page is not None and self._inside(target, page):
+            handler = getattr(page, "_touchpad", None)
+            if callable(handler):
+                return handler
+        return None
+
+    def _tree_touchpad(self, e) -> str:
+        return self._touchpad_view(self.tree, e)
+
+    @staticmethod
+    def _touchpad_view(widget, e) -> str:
+        _dx, dy = touchpad_deltas(e)
+        if not dy:
+            return "break"
+        try:
+            if isinstance(widget, tk.Canvas):
+                widget.tk.call("tk::ScrollByPixels", widget._w, 0, dy)
+            elif e.serial % 5 == 0:  # los Treeview/Listbox van por unidades
+                widget.yview_scroll(-1 if dy > 0 else 1, "units")
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _scrollbar_sibling(self, bar: ttk.Scrollbar):
+        """La vista que controla una barra de desplazamiento, si está a la vista."""
+        for sibling in bar.master.winfo_children():
+            if sibling is bar or not sibling.winfo_ismapped():
+                continue
+            if sibling is self.grid or isinstance(
+                    sibling, (RowList, ttk.Treeview, tk.Canvas, tk.Listbox, tk.Text)):
+                return sibling
+        return None
+
+    def _scrollbar_target(self, bar: ttk.Scrollbar):
+        sibling = self._scrollbar_sibling(bar)
+        if sibling is self.grid:
+            return self.grid._wheel
+        if isinstance(sibling, RowList):
+            return sibling._wheel
+        if sibling is not None:
+            return lambda e, s=sibling: self._wheel_view(s, e)
+        return None
+
+    @staticmethod
+    def _inside(widget, ancestor) -> bool:
+        while widget is not None:
+            if widget is ancestor:
+                return True
+            widget = widget.master
+        return False
 
     def _opening(self) -> bool:
         since = self.transitioning_since
@@ -459,7 +788,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         s = self.style
         k = self.k
         self.configure(bg=p["bg"])
-        for w in (self.content, self.mid):
+        for w in (self.content, self.mid, self.list_tools):
             w.configure(bg=p["bg"])
         self.empty.configure(bg=p["bg"], fg=p["dim"])
         self.genres.restyle(bg=p["bg"], fg=p["fg"], dim=p["dim"], faint=p["faint"], sel=p["sel"],
@@ -517,11 +846,15 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.tree.tag_configure("local", foreground=p["fg"])
         self.tree.tag_configure("remote", foreground=p["dim"])
         self.tree.tag_configure("hover", background=p["hover"])
+        self.grid.restyle(bg=p["bg"], fg=p["fg"], dim=p["dim"], faint=p["faint"],
+                          sel=p["sel"], hover=p["hover"], accent=self.scheme.get(
+                              "accent", p["accent"]))
         scheme = self._scheme(self._ambient)
         self._paint(scheme)
         self._ambient_settled(scheme)
         for page in self.pages.values():
             page.restyle()
+        self._set_view(self.view_mode)
 
     def _scheme(self, color: str | None) -> dict[str, str]:
         """Colores de la ventana para el color de la canción que suena (None: ninguna)."""
@@ -539,13 +872,16 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         p = self.pal
         top, band, accent = c["top"], c["band"], c["accent"]
         self.top.configure(bg=top)
-        self.mark.configure(bg=top, fg=p["fg"])
+        self.mark.configure(bg=top, fg=accent if self._mark_hover else p["fg"])
         self.search_box.restyle(bg=top, field=p["raised"], fg=p["fg"], dim=p["dim"],
                                 faint=p["faint"], line=blend(p["bg"], p["fg"], 0.18),
                                 accent=accent)
         self.btn_dl.restyle(top, p["fg"], p["dim"])
         for b in self.top_icons:
             b.restyle(top, p["fg"], p["dim"], accent)
+        self.list_tools.configure(bg=p["bg"])
+        self.btn_view.restyle(p["bg"], p["fg"], p["dim"], accent)
+        self.btn_more.restyle(p["bg"], p["fg"], p["dim"], accent)
         self.header.restyle(top, p["bg"], p["fg"], p["dim"])
         self.scale.restyle(p["bg"], blend(p["bg"], p["fg"], 0.15), blend(p["bg"], p["fg"], 0.36),
                            accent, p["fg"])
@@ -562,7 +898,18 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def _ambient_settled(self, c: dict[str, str]) -> None:
         self.tree.tag_configure("playing", foreground=c["accent"])
+        self.grid.set_accent(c["accent"])
         style_titlebar(self, self.dark, c["top"])
+        self._style_drawer_tabs(c["accent"])
+        self.lyrics_view.restyle(self.pal["panel"], self.pal["fg"], self.pal["dim"],
+                                 self.pal["faint"], c["accent"])
+
+    def _style_drawer_tabs(self, accent: str) -> None:
+        p = self.pal
+        self.drawer_tabs.configure(bg=p["panel"])
+        for label, active in ((self.tab_queue, self.drawer_mode == "queue"),
+                              (self.tab_lyrics, self.drawer_mode == "lyrics")):
+            label.configure(bg=p["panel"], fg=accent if active else p["faint"])
 
     def _set_ambient(self, color: str | None) -> None:
         """La ventana cambia poco a poco al color de la canción nueva."""
@@ -663,6 +1010,24 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.refresh_view()
         self._fade_rows()
 
+    def go_home(self, _e=None) -> str:
+        """Vuelve a la pantalla principal: cierra páginas/cola y muestra toda la biblioteca."""
+        if self.queue_win is not None:
+            self._show_queue()
+        if self.genres.items:
+            self.genres.selection_clear()
+            self.genres.selection_set(0)  # «Todo»
+            self._pick_genre()
+        return "break"
+
+    def _mark_enter(self, _e=None) -> None:
+        self._mark_hover = True
+        self.mark.configure(fg=self.scheme.get("accent", self.pal["fg"]))
+
+    def _mark_leave(self, _e=None) -> None:
+        self._mark_hover = False
+        self.mark.configure(fg=self.pal["fg"])
+
     def _on_query(self) -> None:
         q = self.query.get().strip()
         if q and self.view_kind in ("liked", "recent", "top"):
@@ -672,13 +1037,61 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.yt_sel = []
             self.sel_keys = {("all", None)}
             self._build_sidebar()
-        if self.remote_src in ("songs", "genre") and q != self.remote_q:
-            self.remote, self.remote_src = [], None  # resultados de YT de otra búsqueda
+        self.search_id += 1  # lo que esté en vuelo ya no corresponde a lo que se está escribiendo
+        self.searching = len(q) >= SEARCH_MIN_CHARS
+        self._show_pre_results(q)
         self.refresh_view()
         if self._qdebounce:
             self.after_cancel(self._qdebounce)
-        if len(q) >= 3:  # búsqueda automática en YT Music cuando dejas de escribir
-            self._qdebounce = self.after(800, lambda: self.search("songs", auto=True))
+            self._qdebounce = None
+        if len(q) >= SEARCH_MIN_CHARS:  # búsqueda automática en YT Music al dejar de escribir
+            if len(q) == SEARCH_MIN_CHARS:
+                # primera pista ya, mientras se sigue escribiendo: el resto se completa después
+                self.search("songs", auto=True)
+            self._qdebounce = self.after(
+                SEARCH_DEBOUNCE_MS, lambda: self.search("songs", auto=True))
+
+    def _show_pre_results(self, q: str) -> None:
+        """Pinta al instante resultados ya vistos para esta búsqueda o para un prefijo suyo.
+
+        Así la lista nunca se queda vacía ni parpadea al escribir: los pre-resultados ocupan
+        su sitio y se sustituyen cuando llega la respuesta definitiva de YouTube.
+        """
+        if not q:
+            if self.remote_src in ("songs", "genre"):
+                self.remote, self.remote_src, self.remote_q = [], None, ""
+            return
+        from ..core import ytsearch
+        hit = ytsearch.cached_songs(q)
+        if hit is not None:
+            if self.remote_src not in ("songs", "genre", None):
+                return  # hay una vista abierta (géneros, importación): no se pisa
+            _query, tracks = hit
+            self.remote, self.remote_src, self.remote_q = tracks, "songs", q
+            self.searching = False  # ya hay algo que enseñar
+            return
+        if self.remote_src not in ("songs", "genre"):
+            return
+        if len(q) < SEARCH_MIN_CHARS:
+            # Sin búsqueda automática no habría quien sustituya estos resultados: se quitan.
+            self.remote, self.remote_src, self.remote_q = [], None, ""
+            return
+        if self._related_query(q, self.remote_q):
+            # La consulta nueva continúa (o recorta) la anterior: sus resultados aún sirven.
+            self.remote_q = q
+            return
+        self.remote, self.remote_src, self.remote_q = [], None, ""
+
+    @staticmethod
+    def _related_query(a: str, b: str) -> bool:
+        """¿Una consulta es prefijo de la otra? Entonces lo que ya se vio sigue siendo útil."""
+        a, b = a.casefold().strip(), (b or "").casefold().strip()
+        return bool(a and b and (a.startswith(b) or b.startswith(a)))
+
+    @staticmethod
+    def _warm_search() -> None:
+        from ..core import ytsearch
+        ytsearch.warm_up()
 
     def _rebuild_search_cache(self) -> None:
         self._search_cache = {
@@ -912,6 +1325,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.tree.insert("", "end", iid=str(i), tags=self._row_tags(t), values=(
                 heart + t["title"], t["artist"], t.get("album") or "", fmt(t.get("duration")),
                 self._row_state(t)))
+        if self.view_mode == "grid":
+            self.grid.set_context(liked=self.liked, damaged=self.damaged, states=self.dl.state,
+                                  view_kind=self.view_kind)
+            self.grid.set_items(rows)
+            self.grid.set_playing(self.playing_vid)
+            self.grid.select(self.tree.selection())
         self._sort_headings()
         self._update_empty()
         self._place_eq()
@@ -923,7 +1342,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         if self.searching:
             text = "Buscando…"
         elif self.query.get().strip():
-            text = "Nada en tu biblioteca. Pulsa Intro para buscar en YouTube."
+            text = "Nada encontrado. Prueba con otra búsqueda."
         elif self.view_kind == "liked":
             text = "Aún no has marcado ninguna canción. Botón derecho → Me gusta."
         elif self.view_kind in ("recent", "top"):
@@ -932,6 +1351,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             text = "Aún no hay nada aquí. Busca una canción arriba para empezar."
         self.empty.configure(text=text)
         self.empty.place(relx=0.5, rely=0.42, anchor="center")
+        self.empty.lift()
 
     def _sort_headings(self) -> None:
         for c, text, _w in COLS:
@@ -953,6 +1373,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         iid = self.vid_iid.get(vid) if vid else None
         if iid is not None and self.tree.exists(iid):
             self.tree.item(iid, tags=self._row_tags(self.rows[int(iid)]))
+        if self.view_mode == "grid":
+            self.grid.set_playing(self.playing_vid)
         self._place_eq()
 
     def _set_state(self, vid: str, text: str) -> None:
@@ -960,6 +1382,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         iid = self.vid_iid.get(vid)
         if iid is not None and self.tree.exists(iid):
             self.tree.set(iid, "state", text)
+        self.grid.set_state(vid, text)
 
     def _selected(self) -> list[dict]:
         return [self.rows[i] for i in sorted(int(i) for i in self.tree.selection())]
@@ -983,6 +1406,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         keep = [self.vid_iid[t["video_id"]] for t in picks if t["video_id"] in self.vid_iid]
         if keep:  # la selección sobrevive: se pueden marcar varias seguidas
             self.tree.selection_set(keep)
+            self._on_select()
         self.status.configure(text=f"{len(picks)} en Me gusta" if want
                               else f"{len(picks)} fuera de Me gusta")
 
@@ -1129,6 +1553,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def after_tag_edit(self, updated: dict) -> None:
         vid = updated["video_id"]
         self.refresh_library()
+        self.grid.forget_cover(vid)  # la carátula incrustada pudo cambiar con las etiquetas
         if self.cur_track and self.cur_track.get("video_id") == vid:
             self.cur_track = {**self.cur_track, **updated}
             self.now.set(updated.get("title") or "", updated.get("artist") or "")
@@ -1154,21 +1579,34 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             t["_genre"] = genre
         return tracks
 
+    def _search_in_flight(self, q: str) -> bool:
+        """¿Ya hay una petición en curso para esta misma consulta? No se duplica."""
+        running = self._remote_inflight
+        return bool(running and running[0] == q and time.monotonic() - running[1] < 15)
+
     def search(self, kind: str = "songs", auto: bool = False) -> None:
         q = self.query.get().strip()
         if not q:
+            return
+        if kind == "songs" and self._search_in_flight(q):
             return
         if self.active_page is not None:
             self.close_page()
         if self._qdebounce:
             self.after_cancel(self._qdebounce)
+            self._qdebounce = None
         self.searching = True
         self.status.configure(text="Buscando en YouTube…")
         self.search_id += 1
         sid = self.search_id
+        marker = None
+        if kind == "songs":
+            marker = self._remote_inflight = (q, time.monotonic())
 
         def work() -> None:
             try:
+                if sid != self.search_id:  # mientras se lanzaba el hilo se escribió otra cosa
+                    return
                 from ..core import genres, ytsearch
                 if kind == "genre":
                     # solo canciones nuevas: lo que ya está descargado no ocupa sitio en los 100
@@ -1176,14 +1614,28 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                     label, tracks = genres.select_tracks(
                         q, 100, skip_ids=skip_ids, skip_songs=skip_songs)
                     self._tag_results(tracks, label)
-                else:
-                    tracks = self._tag_results(ytsearch.search_songs(q, 40), None)
-                self.q.put(("results", sid, tracks, kind, q))
+                    self.q.put(("results", sid, tracks, kind, q, True))
+                    return
+                # Primero una sola página (una petición): resultados visibles cuanto antes.
+                tracks = self._tag_results(ytsearch.search_songs(q, SEARCH_FIRST_PAGE), None)
+                if sid != self.search_id:
+                    return
+                if len(tracks) < SEARCH_FIRST_PAGE or SEARCH_LIMIT <= SEARCH_FIRST_PAGE:
+                    self.q.put(("results", sid, tracks, kind, q, True))
+                    return
+                self.q.put(("results", sid, tracks, kind, q, False))
+                if sid != self.search_id:
+                    return
+                full = self._tag_results(ytsearch.search_songs(q, SEARCH_LIMIT), None)
+                self.q.put(("results", sid, full, kind, q, True))
             except Exception as exc:  # noqa: BLE001 - sin internet, etc.
                 _log.failure(log, f"búsqueda fallida ({kind}: {q!r})", exc)
                 self.q.put(("remote_error", sid, str(exc)))
+            finally:
+                if marker is not None and self._remote_inflight is marker:
+                    self._remote_inflight = None
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, daemon=True, name="buscar-youtube").start()
 
     def _search_genres(self) -> None:
         names = list(self.yt_sel)
@@ -1394,7 +1846,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.active_page = None
         self._refresh_nav()
         self.refresh_view()
-        self.tree.focus_set()
+        (self.grid if self.view_mode == "grid" else self.tree).focus_set()
 
     def _escape(self, _e=None) -> str | None:
         if self.active_page is not None:
@@ -1485,6 +1937,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def _on_select(self, _e=None) -> None:
         sel = self.tree.selection()
         self._place_eq()
+        if self.view_mode == "grid":
+            self.grid.select(sel)
         self.btn_dl.set_visible(any(int(i) < len(self.rows) and self._is_remote(self.rows[int(i)])
                                     for i in sel))
         if len(sel) == 1 and int(sel[0]) < len(self.rows):
@@ -1504,6 +1958,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.tree.selection_set(rows)
             if focus not in rows:
                 self.tree.focus(rows[0])
+            self._on_select()
         return "break"
 
     def _prefetch_next(self) -> None:
@@ -1528,8 +1983,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             waveform.forget(t["video_id"])
             try:
                 Path(t["path"]).unlink(missing_ok=True)
-                (Path(config.DATA_DIR) / "cache" / "covers" / f"{t['video_id']}.bin").unlink(
-                    missing_ok=True)
+                covers.cache_path(t["video_id"]).unlink(missing_ok=True)
             except OSError:
                 log.warning("no se pudo borrar %s", t["path"], exc_info=True)
             self.dl.state.pop(t["video_id"], None)
@@ -1538,11 +1992,14 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     # ---------- menú contextual ----------
     def _context(self, e) -> None:
-        iid = self.tree.identify_row(e.y)
+        self._context_at(self.tree.identify_row(e.y), e.x_root, e.y_root)
+
+    def _context_at(self, iid: str | None, x_root: int, y_root: int) -> None:
         if not iid:
             return
         if iid not in self.tree.selection():
             self.tree.selection_set(iid)
+            self._on_select()
         m = self._menu()
         m.add_command(label="Reproducir", command=lambda: self.play_index(int(iid)))
         m.add_command(label="Reproducir a continuación",
@@ -1573,7 +2030,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         m.add_checkbutton(label="Normalizar volumen (ReplayGain)",
                           variable=self.var_normalize, command=self.toggle_normalize)
         try:
-            m.tk_popup(e.x_root, e.y_root)
+            m.tk_popup(x_root, y_root)
         finally:
             m.grab_release()
 
@@ -1618,6 +2075,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.pq.played = {t["video_id"]}
         self.seed_token += 1
         self.seed_genre = self._genre_of(t)
+        self.queue_why = {}
         self.topping = False
         if self.online:
             self._fetch_radio(t)
@@ -1629,6 +2087,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         if self.topping:
             return
         self.topping, token = True, self.seed_token
+        self.radio_seed = t
 
         def work() -> None:
             try:
@@ -1649,12 +2108,15 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         if token != self.seed_token or not self.pq.auto_ctx:
             return
         have = {x["video_id"] for x in self.pq.ctx} | self.pq.played
+        seed = self.radio_seed or {}
+        reason = f"similar a {seed.get('artist') or seed.get('title') or 'la semilla'}"
         new = []
         for x in tracks:
             if x["video_id"] in have:
                 continue
             x["_genre"] = self.seed_genre  # lo que se guarde por el respaldo cae en el mismo género
             new.append(self.lib_by_id.get(x["video_id"], x))  # si ya la tienes, suena desde el disco
+            self.queue_why[x["video_id"]] = reason
         if new:
             self._append_ctx(new)
             self.status.configure(text=f"Cola automática: {len(new)} canciones similares")
@@ -1677,8 +2139,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         cur = self.pq.current(self.playing_vid)
         genre = (self._genre_of(cur) if cur else None) or self.seed_genre
         exclude = {x["video_id"] for x in self.pq.ctx} | self.pq.played
-        tracks = autoqueue.backup_queue(self.library, genre, exclude, n)
+        tracks = autoqueue.backup_queue(
+            self.library, genre, exclude, n,
+            energy=self._track_energy, target_energy=self._track_energy(cur) if cur else None)
         if tracks:
+            for track in tracks:
+                self.queue_why[track["video_id"]] = autoqueue.reason_for(track, genre)
             self._append_ctx(tracks)
             same = sum(1 for x in tracks if (x.get("genre") or "").lower() == (genre or "").lower())
             self.status.configure(text=f"Cola de respaldo: {len(tracks)} canciones "
@@ -1742,19 +2208,110 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         if opening and self.active_page is not None:
             self.close_page()
         self.queue_win = self.drawer if opening else None
-        self.queue_lb = self.drawer_list if opening else None
+        self.queue_lb = (self.drawer_list if opening and self.drawer_mode == "queue"
+                         else None)
         self.btn_queue.set_on(opening)
         start, to = self._drawer_x, 0 if opening else int(DRAWER_W * self.k)
         self.drawer.lift()
         if opening:
-            self._refresh_queue()
-            self.drawer_list.focus_set()
+            self._set_drawer_mode(self.drawer_mode)
+            if self.drawer_mode == "lyrics":
+                self.lyrics_view.text.focus_set()
+            else:
+                self.drawer_list.focus_set()
 
         def step(p: float) -> None:
             self._drawer_x = int(start + (to - start) * p)
             self.drawer.place_configure(x=self._drawer_x)
 
         self.anim.tween("drawer", 260 if opening else 190, step)
+
+    def _set_drawer_mode(self, mode: str) -> None:
+        """Alterna el panel entre la cola y la letra, sin cerrarlo."""
+        self.drawer_mode = "lyrics" if mode == "lyrics" else "queue"
+        self.queue_lb = self.drawer_list if self.drawer_mode == "queue" else None
+        if self.drawer_mode == "lyrics":
+            self.drawer_list.pack_forget()
+            self.drawer_hint.pack_forget()
+            self.lyrics_view.pack(fill="both", expand=True, padx=int(4 * self.k),
+                                  pady=(0, int(4 * self.k)))
+            self.drawer_title.configure(text="Letra")
+            self.drawer_sub.configure(
+                text="Sincronizada con la canción" if self.lyrics_enabled
+                else "Actívala en Ajustes › Reproducción")
+            self._load_lyrics(self.cur_track)
+            self._sync_lyrics(force=True)
+        else:
+            self.lyrics_view.pack_forget()
+            self.drawer_hint.pack(fill="x", padx=int(16 * self.k), pady=(0, int(8 * self.k)))
+            self.drawer_list.pack(fill="both", expand=True, padx=int(4 * self.k))
+            self.drawer_title.configure(text="A continuación")
+            self._refresh_queue()
+        self._style_drawer_tabs(self.scheme.get("accent", self.pal["accent"]))
+
+    # ---------- letras ----------
+    def _load_lyrics(self, t: dict | None) -> None:
+        """Pide la letra de la canción actual y la muestra; nunca bloquea el hilo de la ventana."""
+        if not self.lyrics_enabled:
+            self._lyrics_payload = self._lyrics_vid = None
+            self.lyrics_view.set_message("Activa las letras en Ajustes › Reproducción.")
+            return
+        if not t:
+            self._lyrics_payload = self._lyrics_vid = None
+            self.lyrics_view.set_message("Sin canción.")
+            return
+        vid = t["video_id"]
+        if vid == self._lyrics_vid:
+            return
+        self._lyrics_vid, self._lyrics_payload = vid, None
+        cached = lyrics_store.cached(vid)
+        if cached is not None:
+            self._apply_lyrics(vid, cached)
+            return
+        self.lyrics_view.set_message("Buscando letra…")
+        self.status.configure(text="Buscando la letra…")
+        token = self.play_token
+
+        def work() -> None:
+            self.q.put(("lyrics", vid, token, lyrics_store.fetch(t)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_lyrics(self, vid: str, payload: dict | None) -> None:
+        if vid != self._lyrics_vid:
+            return
+        self._lyrics_payload = payload
+        if payload is None:
+            self.lyrics_view.set_message("No se pudo buscar la letra.")
+            self.drawer_sub.configure(text="Sin conexión con LRCLIB")
+        elif payload.get("negative"):
+            self.lyrics_view.set_message("Sin letra para esta canción.")
+            self.drawer_sub.configure(text="LRCLIB no tiene esta letra")
+        else:
+            self.lyrics_view.show(payload)
+            self.drawer_sub.configure(
+                text="Sincronizada" if payload.get("synced") else "Letra sin tiempos")
+        self._sync_lyrics(force=True)
+
+    def _sync_lyrics(self, force: bool = False) -> None:
+        if (self.drawer_mode != "lyrics" or self.queue_win is None
+                or not self._lyrics_payload or not self.player.loaded):
+            return
+        try:
+            position = self.player.position()
+        except Exception:  # noqa: BLE001 - la letra no debe parar el tick de reproducción
+            return
+        self.lyrics_view.sync(position, force=force)
+
+    def toggle_lyrics(self) -> None:
+        self.lyrics_enabled = not self.lyrics_enabled
+        self.var_lyrics.set(self.lyrics_enabled)
+        self.save_prefs()
+        if self.drawer_mode == "lyrics" and self.queue_win is not None:
+            self._lyrics_vid = None
+            self._load_lyrics(self.cur_track)
+        self.status.configure(text="Letras " + ("activadas" if self.lyrics_enabled
+                                                else "desactivadas"))
 
     def _refresh_queue(self) -> None:
         lb = self.queue_lb
@@ -1770,6 +2327,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
         def add(t: dict, kind: str, idx: int, **extra) -> None:
             item = dict(text=f"{t['title']} — {t['artist']}", **extra)
+            why = self.queue_why.get(t["video_id"]) if kind == "ctx" and self.pq.auto_ctx else None
+            if why:
+                item["sub"] = why
             if kind in ("up", "ctx"):  # solo lo que queda por delante se puede arrastrar
                 item["move"] = kind
             items.append(item)
@@ -1912,6 +2472,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.player.stop()
         self.transitioning_since = time.monotonic()
         self.cur_track = t
+        self._preview_vid = None  # la siguiente canción podrá anticipar su color
         old, self.playing_vid = self.playing_vid, vid
         self._stream_retries.pop(vid, None)
         self.pq.played.add(vid)
@@ -1926,7 +2487,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         iid = self.vid_iid.get(vid)
         if iid is not None and self.tree.exists(iid):
             self.tree.see(iid)
+        if self.view_mode == "grid" and iid is not None:
+            self.grid.see(int(iid))
         self.now.set(t["title"], t.get("artist") or "")
+        if self.queue_win is not None and self.drawer_mode == "lyrics":
+            self._load_lyrics(t)
         self._show_wave(t)
         self.scale.set(0)
         self.time.configure(text="0:00 / 0:00")
@@ -2244,6 +2809,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                             self.dl.start_download(t, quiet=True)
                             self.status.configure(text="Streaming · guardándola en tu biblioteca…")
                     self.scale.set(pos / self.player.length * 1000)
+                    self._sync_lyrics()
                     self.time.configure(
                         text=f"{fmt(pos / 1000)} / {fmt(self.player.length / 1000)}")
                     if pos != self.last_pos[0] or self.player.paused:
@@ -2274,34 +2840,37 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                     self.status.configure(text=f"No se pudo reproducir: {exc}")
 
     # ---------- portada ----------
+    def _preview_ambient(self, t: dict) -> None:
+        """Pide la portada de la siguiente canción para teñir la ventana antes de la mezcla."""
+        vid = t.get("video_id")
+        if not vid or vid == self._preview_vid:
+            return
+        self._preview_vid = vid
+        local = t.get("path") or (self.lib_by_id.get(vid) or {}).get("path")
+
+        def work() -> None:
+            self.q.put(("preview_cover", vid, covers.load(t, local)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_preview_cover(self, vid: str, data: bytes | None) -> None:
+        """Aplica el color de la próxima solo si sigue siendo la próxima y hay música sonando."""
+        if (vid != self._preview_vid or not self.player.loaded or self.player.paused
+                or (self.cur_track or {}).get("video_id") == vid
+                or (self._peek_next() or {}).get("video_id") != vid):
+            return
+        color = None
+        if data:
+            from PIL import Image
+            try:
+                color = dominant_color(Image.open(io.BytesIO(data)).convert("RGB"))
+            except Exception as exc:  # noqa: BLE001 - portada corrupta: degradado de la canción
+                _log.failure(log, "portada ilegible para el color de la próxima", exc)
+        self._set_ambient(color or seed_color(vid))
+
     def _load_cover(self, t: dict, path: str | None, token: int) -> None:
         def work() -> None:
-            data = None
-            vid = t["video_id"]
-            from pathlib import Path as _P
-            cache_dir = _P(config.DATA_DIR) / "cache" / "covers"
-            cache_file = cache_dir / f"{vid}.bin"
-            try:
-                if path:
-                    from mutagen.mp4 import MP4
-                    covr = (MP4(path).tags or {}).get("covr")
-                    data = bytes(covr[0]) if covr else None
-                    if data and not cache_file.exists():
-                        cache_dir.mkdir(parents=True, exist_ok=True)
-                        cache_file.write_bytes(data)
-                if not data and cache_file.exists():  # archivo local sin carátula incrustada
-                    data = cache_file.read_bytes() or None
-                if not data and t.get("cover"):  # ni incrustada ni en caché: se pide a YouTube
-                    with urllib.request.urlopen(t["cover"], timeout=10) as resp:
-                        data = resp.read(8 * 1024 * 1024 + 1)
-                    if data and len(data) <= 8 * 1024 * 1024:
-                        cache_dir.mkdir(parents=True, exist_ok=True)
-                        cache_file.write_bytes(data)
-                    else:
-                        data = None
-            except Exception as exc:  # noqa: BLE001 - sin portada no pasa nada
-                _log.failure(log, f"sin portada para {vid}", exc)
-                data = None
+            data = covers.load(t, path)
             self.q.put(("cover", token, data))
 
         threading.Thread(target=work, daemon=True).start()
@@ -2355,6 +2924,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                 "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
                 "normalize": self.normalize, "cookies": self.cookies,
                 "reduce_motion": self.anim.reduced, "auto_update": self.auto_update,
+                "view": self.view_mode, "lyrics": self.lyrics_enabled,
                 "ytdlp_checked_at": self._ytdlp_checked_at}
 
     def _close(self) -> None:
@@ -2365,6 +2935,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.player.close()
         self.dl.close()
         self.play_pool.shutdown(wait=False, cancel_futures=True)
+        self.thumb_pool.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
 

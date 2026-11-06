@@ -121,6 +121,15 @@ def _more(d, w):
         d.ellipse(((x - 1.6) * SS, 10.4 * SS, (x + 1.6) * SS, 13.6 * SS), fill=255)
 
 
+def _tools(d, w):
+    """Caja de herramientas: las acciones de mantenimiento de la biblioteca."""
+    d.rounded_rectangle((4 * SS, 9 * SS, 20 * SS, 20 * SS), radius=2.4 * SS,
+                        outline=255, width=w)
+    _line(d, [(8.5, 9), (8.5, 6.5), (15.5, 6.5), (15.5, 9)], w)
+    _line(d, [(4, 14), (20, 14)], w)
+    d.rounded_rectangle((10.4 * SS, 12.2 * SS, 13.6 * SS, 15.8 * SS), radius=1 * SS, fill=255)
+
+
 def _settings(d, w):
     """Engranaje de ocho dientes: ajustes y atajos."""
     _line(d, _arc(12, 12, 7.5, 0, 360), w)
@@ -132,10 +141,24 @@ def _settings(d, w):
         _line(d, [(x0, y0), (x1, y1)], w)
 
 
+def _grid(d, w):
+    """Cuatro baldosas: la vista de cuadrícula."""
+    for x, y in ((4, 4), (13, 4), (4, 13), (13, 13)):
+        d.rounded_rectangle((x * SS, y * SS, (x + 7) * SS, (y + 7) * SS),
+                            radius=1.6 * SS, outline=255, width=w)
+
+
+def _list(d, w):
+    """Filas con su viñeta: la vista de lista."""
+    for y in (6.5, 12, 17.5):
+        d.ellipse(((4 - 1.2) * SS, (y - 1.2) * SS, (4 + 1.2) * SS, (y + 1.2) * SS), fill=255)
+        _line(d, [(8.5, y), (20, y)], w)
+
+
 _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=_repeat1,
               infinity=_infinity, xfade=_xfade, queue=_queue, volume=_volume, search=_search,
               theme=_theme, downloads=_downloads, note=_note, back=_back, link=_link,
-              more=_more, settings=_settings)
+              more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list)
 
 
 def names() -> list[str]:

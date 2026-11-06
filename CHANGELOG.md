@@ -1,5 +1,44 @@
 # Cambios
 
+## Sin publicar
+
+### Búsqueda
+- La búsqueda en YouTube Music es **mucho más rápida**: empieza a buscar a las tres letras,
+  muestra **pre-resultados** al instante mientras escribes y los sustituye por los definitivos
+  cuando llegan. Las primeras 20 canciones aparecen con una sola petición y el resto se completa
+  por detrás, sin hacer esperar.
+- Las búsquedas recientes se guardan en memoria: repetir una consulta (o escribir una que empiece
+  igual) responde al momento, y la conexión con YouTube se deja preparada al abrir la ventana.
+
+### Reproducción
+- La **onda** y el **ecualizador** siguen el volumen real de la canción: crecen en los pasajes
+  fuertes y se calman en los suaves.
+- El **color de la ventana** se adelanta a la portada de la siguiente canción antes del crossfade.
+- La **transición** se adapta a la energía: más larga entre canciones tranquilas y más corta
+  cuando el salto de intensidad es grande.
+- La **cola automática** evita saltos bruscos de intensidad y muestra bajo cada canción por qué la
+  eligió («similar a…», «mismo género», «otro género»).
+- **Letras sincronizadas** opcionales en la pestaña «Letra» de «A continuación». Se activan en
+  Ajustes → Reproducción, se piden a LRCLIB y se guardan en caché para escucharlas sin conexión.
+
+### Interfaz
+- **Vista de cuadrícula** con la portada de cada canción, además de la lista. Se cambia con el
+  icono de la esquina superior derecha de la lista, `Ctrl+Shift+L` o Ajustes → Apariencia, y se
+  recuerda al cerrar.
+- El menú **Más acciones de la biblioteca** se traslada junto al selector de vista, a la derecha,
+  con un nuevo icono de caja de herramientas.
+- La ventana y los diálogos usan el **icono de Sound** (la onda), no el de Python/Tk. El `.ico`
+  viaja empaquetado con la aplicación y se aplica al abrirla.
+- Un clic en **«Sound»** (arriba a la izquierda) vuelve a la pantalla principal: cierra páginas y
+  «A continuación», limpia la búsqueda y selecciona «Todo» en el lateral.
+- Las portadas de la cuadrícula se cargan solo para las tarjetas visibles, se guardan en caché y,
+  si una canción no tiene carátula, se usa su degradado propio. La selección, el clic derecho, el
+  teclado y el ecualizador de la canción que suena funcionan igual que en la lista.
+- La **rueda del ratón** y el **gesto de dos dedos del touchpad** desplazan la vista que hay bajo
+  el puntero: lista, cuadrícula, géneros, «A continuación», Ajustes y también las propias barras
+  de desplazamiento. En Tk 9 el touchpad usa su propio evento, así que se atiende aparte de la
+  rueda clásica.
+
 ## 1.0.2 — 2026-11-06
 
 ### Interfaz

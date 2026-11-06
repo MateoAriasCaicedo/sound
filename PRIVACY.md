@@ -7,8 +7,9 @@ Sound funciona en el equipo del usuario. No tiene cuentas, telemetría ni servid
 - Biblioteca, cola, historial y «Me gusta»: `%LOCALAPPDATA%\Sound\library.db`.
 - Preferencias y sesión de reproducción: `ui_prefs.json` y `ui_session.json` en la misma carpeta.
 - Canciones y carátulas: `%USERPROFILE%\Music\Sound`.
-- Formas de onda, volumen medido y registro de errores: `%LOCALAPPDATA%\Sound\cache` y
-  `%LOCALAPPDATA%\Sound\sound.log`.
+- Formas de onda, volumen medido, letras consultadas y registro de errores:
+  `%LOCALAPPDATA%\Sound\cache` y `%LOCALAPPDATA%\Sound\sound.log`. Las letras solo se guardan si
+  el usuario activa esa opción.
 
 El registro puede contener rutas de archivos, títulos de canciones, identificadores de vídeo y
 mensajes de error técnicos. No contiene cookies ni contraseñas.
@@ -19,6 +20,8 @@ mensajes de error técnicos. No contiene cookies ni contraseñas.
   aplicación y está sujeto a la política de privacidad de Google.
 - **iTunes Search API**: solo cuando una canción llega sin género; se envía el artista y el
   título para intentar clasificarla.
+- **LRCLIB**: solo si el usuario activa las letras. Se envían el título, el artista, el álbum y la
+  duración de la canción que suena para pedir su letra. La letra se guarda en caché local.
 - **PyPI**: al usar «Actualizar yt-dlp», se consulta la versión publicada y se descarga el wheel
   oficial.
 

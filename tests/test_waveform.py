@@ -51,6 +51,23 @@ def test_resample_averages_and_stretches():
     assert waveform.resample([1.0], 0) == []
 
 
+def test_level_at_maps_a_fraction_to_the_current_bucket():
+    levels = [0.0, 0.5, 1.0]
+    assert waveform.level_at(levels, 0) == 0.0
+    assert waveform.level_at(levels, 0.5) == 0.5
+    assert waveform.level_at(levels, 0.99) == 1.0
+    assert waveform.level_at(levels, 2) == 1.0
+    assert waveform.level_at([], 0.5) == 0.0
+
+
+def test_summary_describes_intensity_without_dependencies():
+    calm = waveform.summary([0.2] * 100)
+    loud = waveform.summary([0.9] * 100)
+    assert loud["energy"] > calm["energy"]
+    assert loud["punch"] == pytest.approx(0.0)
+    assert waveform.summary(None) == {"energy": 0.0, "punch": 0.0, "onset": 0.0}
+
+
 def test_cache_round_trip_and_forget():
     assert waveform.load("abc-123_X") is None
     waveform.save("abc-123_X", [0.0, 0.5, 1.0])

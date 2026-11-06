@@ -65,6 +65,34 @@ def resample(levels: list[float], n: int) -> list[float]:
     return out
 
 
+def level_at(levels: list[float] | None, fraction: float) -> float:
+    """Nivel (0 a 1) en una posición de la canción, dada como fracción de 0 a 1."""
+    if not levels:
+        return 0.0
+    i = int(max(0.0, min(1.0, float(fraction))) * len(levels))
+    return levels[min(len(levels) - 1, i)]
+
+
+def summary(levels: list[float] | None) -> dict[str, float]:
+    """Resumen de intensidad de una canción a partir de sus niveles RMS.
+
+    `energy` es el volumen medio, `punch` cuánto destacan los picos sobre el centro y `onset` la
+    proporción de tramos que suben respecto al anterior. No es tempo ni tonalidad: sirve para
+    comparar canciones por intensidad sin dependencias externas.
+    """
+    if not levels:
+        return {"energy": 0.0, "punch": 0.0, "onset": 0.0}
+    ordered = sorted(levels)
+    middle = ordered[len(ordered) // 2]
+    high = ordered[min(len(ordered) - 1, len(ordered) * 9 // 10)]
+    rises = sum(1 for a, b in zip(levels, levels[1:]) if b - a > 0.04)
+    return {
+        "energy": sum(levels) / len(levels),
+        "punch": max(0.0, high - middle),
+        "onset": rises / max(1, len(levels) - 1),
+    }
+
+
 def analyze(path: str | Path, low_priority: bool = False) -> list[float]:
     """Decodifica el archivo con ffmpeg y devuelve sus niveles. Lanza si no puede."""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

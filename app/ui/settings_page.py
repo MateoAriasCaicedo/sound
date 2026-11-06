@@ -11,7 +11,7 @@ from ..core import downloader, startup
 from .anim import reduced_motion
 from .page import Page
 from .theme import system_is_dark
-from .widgets import PillButton
+from .widgets import PillButton, bind_touchpad, touchpad_deltas
 
 
 class SettingsPage(Page):
@@ -48,6 +48,7 @@ class SettingsPage(Page):
         self._build_about()
         self._bind_wheel(self.inner)
         self.outer.bind("<MouseWheel>", self._wheel)
+        bind_touchpad(self.outer, self._touchpad)
 
         self.restyle()
         self._refresh_labels()
@@ -98,6 +99,10 @@ class SettingsPage(Page):
         self.btn_theme = self._setting(
             section, "Tema", "Claro u oscuro; también con el icono de la barra superior.",
             "", self.toggle_theme)
+        self.btn_view = self._setting(
+            section, "Vista de la biblioteca",
+            "Lista con columnas o cuadrícula con portadas; también Ctrl+Shift+L.",
+            "", self.toggle_view)
         self.btn_motion = self._setting(
             section, "Animaciones",
             "Desactívalas si prefieres transiciones instantáneas o usas lector de pantalla.",
@@ -115,12 +120,17 @@ class SettingsPage(Page):
             section, "Cola automática", "Añade canciones similares cuando se acaba la cola.",
             "", self.toggle_auto)
         self.btn_xfade = self._setting(
-            section, "Transición", "Crossfade entre canciones; sin crossfade el paso es sin hueco.",
+            section, "Transición",
+            "Crossfade entre canciones, ajustado a su energía; sin crossfade el paso es sin hueco.",
             "", self.cycle_xfade)
         self.btn_normalize = self._setting(
             section, "Normalizar volumen",
             "Iguala el volumen con ReplayGain; necesita ffmpeg instalado.",
             "", self.toggle_normalize)
+        self.btn_lyrics = self._setting(
+            section, "Letras",
+            "Busca la letra sincronizada en LRCLIB; requiere internet y envía título y artista.",
+            "", self.toggle_lyrics)
 
     def _build_downloads(self) -> None:
         section = self._section(
@@ -173,6 +183,7 @@ class SettingsPage(Page):
             ("Ctrl+G", "Música por frase"),
             ("Ctrl+L", "Me gusta / quitar Me gusta"),
             ("Ctrl+A", "Seleccionar toda la vista"),
+            ("Ctrl+Shift+L", "Alternar lista y cuadrícula"),
             ("Ctrl+,  /  F1", "Abrir Ajustes y esta ayuda"),
             ("Ctrl+M", "Silenciar / recuperar el volumen"),
             ("Ctrl+↑ / ↓", "Subir o bajar el volumen"),
@@ -220,6 +231,10 @@ class SettingsPage(Page):
         self.app.toggle_theme()
         self._refresh_labels()
 
+    def toggle_view(self) -> None:
+        self.app.toggle_view_mode()
+        self._refresh_labels()
+
     def toggle_motion(self) -> None:
         self.app.toggle_reduce_motion()
         self._refresh_labels()
@@ -245,6 +260,10 @@ class SettingsPage(Page):
         self.app.toggle_normalize()
         self._refresh_labels()
 
+    def toggle_lyrics(self) -> None:
+        self.app.toggle_lyrics()
+        self._refresh_labels()
+
     def toggle_auto_update(self) -> None:
         self.app.toggle_auto_update()
         self._refresh_labels()
@@ -260,8 +279,8 @@ class SettingsPage(Page):
         if not messagebox.askyesno(
                 "Restaurar ajustes",
                 "Se restauran tema, volumen, orden, repetición, cola automática, transición, "
-                "normalización, animaciones y actualización automática.\n\nLa biblioteca, las "
-                "cookies y las descargas no se tocan.\n\n¿Continuar?", parent=self):
+                "normalización, letras, animaciones y actualización automática.\n\nLa biblioteca, "
+                "las cookies y las descargas no se tocan.\n\n¿Continuar?", parent=self):
             return
         app = self.app
         app.dark = system_is_dark()
@@ -273,6 +292,8 @@ class SettingsPage(Page):
         app.xfade_ms = 4000
         app.var_normalize.set(False)
         app.normalize = False
+        app.var_lyrics.set(False)
+        app.lyrics_enabled = False
         app.auto_update = True
         app._ytdlp_checked_at = 0.0
         app.player.set_gain_db(0)
@@ -287,6 +308,7 @@ class SettingsPage(Page):
     # ---------- vista ----------
     def _refresh_labels(self) -> None:
         self.btn_theme.set_text("Oscuro" if self.app.dark else "Claro")
+        self.btn_view.set_text("Cuadrícula" if self.app.view_mode == "grid" else "Lista")
         self.btn_motion.set_text("Activadas" if not self.app.anim.reduced else "Reducidas")
         self.btn_shuffle.set_text("Activado" if self.app.pq.shuffle else "Desactivado")
         repeat = ("Sin repetir", "Repetir lista", "Repetir canción")[self.app.pq.repeat]
@@ -295,18 +317,27 @@ class SettingsPage(Page):
         xfade = self.app.xfade_ms
         self.btn_xfade.set_text("Sin crossfade" if not xfade else f"{xfade // 1000} s")
         self.btn_normalize.set_text("Activada" if self.app.normalize else "Desactivada")
+        self.btn_lyrics.set_text("Activadas" if self.app.lyrics_enabled else "Desactivadas")
         self.btn_auto_update.set_text("Activada" if self.app.auto_update else "Desactivada")
         self.btn_start_windows.set_enabled(startup.available())
         self.btn_start_windows.set_text(
             ("Activado" if self.app.start_with_windows else "Desactivado")
             if startup.available() else "No disponible")
 
-    def _wheel(self, e) -> None:
-        self.outer.yview_scroll(int(-1 * (e.delta / 120)), "units")
+    def _wheel(self, e) -> str:
+        self.outer.yview_scroll(self.app._wheel_steps(e), "units")
+        return "break"
+
+    def _touchpad(self, e) -> str:
+        _dx, dy = touchpad_deltas(e)
+        if dy:
+            self.outer.tk.call("tk::ScrollByPixels", self.outer._w, 0, dy)
+        return "break"
 
     def _bind_wheel(self, widget) -> None:
         for child in widget.winfo_children():
             child.bind("<MouseWheel>", self._wheel, add="+")
+            bind_touchpad(child, self._touchpad, add=True)
             self._bind_wheel(child)
 
     def _paint(self, widget) -> None:

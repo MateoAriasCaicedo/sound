@@ -6,6 +6,8 @@ instancia de ``App`` (acceso a ``player``, ``pq``, ``cur_track``, etc.).
 """
 from pathlib import Path
 
+from ..core import waveform
+
 FADE_TICK_MS = 40
 PREPARE_WINDOW_MS = 12_000
 LEAD_MS = 60
@@ -23,6 +25,17 @@ class PlaybackMixin:
         """La canción que `step(1)` elegiría ahora, sin cambiar nada."""
         return self.pq.peek_next(self.cur_track)
 
+    def _track_energy(self, track: dict | None) -> float | None:
+        """Intensidad media de una canción (0 a 1), si su onda ya se midió."""
+        vid = (track or {}).get("video_id")
+        if not vid:
+            return None
+        cache = self._energy_cache
+        if vid not in cache:
+            levels = waveform.load(vid)
+            cache[vid] = waveform.summary(levels)["energy"] if levels else None
+        return cache[vid]
+
     def _xfade_for(self, cur: dict | None, nxt: dict) -> int:
         """Duración del crossfade entre dos canciones. 0 = paso sin hueco (gapless)."""
         x = self.xfade_ms
@@ -30,10 +43,25 @@ class PlaybackMixin:
             return 0
         if cur.get("album") and cur.get("album") == nxt.get("album"):
             return 0  # pistas del mismo álbum: suelen enlazar entre sí, no se pisan
+        x = self._adapt_xfade(x, cur, nxt)
         for ms in (self.player.length, (nxt.get("duration") or 0) * 1000):
             if ms:
                 x = min(x, int(ms * 0.3))  # una canción corta no se pierde en la mezcla
         return max(x, 0)
+
+    def _adapt_xfade(self, x: int, cur: dict, nxt: dict) -> int:
+        """Ajusta la mezcla a la energía: más larga entre canciones tranquilas y más corta
+        cuando el salto de intensidad es grande. Sin datos de onda, se respeta lo configurado."""
+        if x <= 0:
+            return x
+        a, b = self._track_energy(cur), self._track_energy(nxt)
+        if a is None or b is None:
+            return x
+        if a < 0.35 and b < 0.35:
+            return int(x * 1.25)
+        if abs(a - b) > 0.45:
+            return max(1000, int(x * 0.7))
+        return x
 
     def _ensure_ready(self, t: dict) -> bool:
         """Deja la siguiente abierta en el reproductor para que arranque sin demora."""
@@ -128,6 +156,8 @@ class PlaybackMixin:
         if nxt is None:
             return
         ready = self._ensure_ready(nxt)
+        if ready:
+            self._preview_ambient(nxt)  # la ventana vira al color de la siguiente antes de mezclar
         x = self._xfade_for(self.cur_track, nxt)
         if ready and rem <= max(x, 0) + (LEAD_MS if x else GAPLESS_LEAD_MS):
             self.auto_fired = self.playing_vid

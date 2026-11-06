@@ -7,6 +7,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = Path(SPECPATH).resolve()
 
 datas = collect_data_files("ytmusicapi")
+# El .ico va dentro del ejecutable para la barra de tareas/menú, pero Tk necesita además el
+# archivo para ponerlo en la ventana y en los diálogos; el .png es el respaldo en otros Tk.
+datas += [
+    (str(ROOT / "packaging" / "sound.ico"), "packaging"),
+    (str(ROOT / "packaging" / "sound.png"), "packaging"),
+]
 hiddenimports = (
     # La ventana importa páginas y el servicio de descargas de forma diferida; PyInstaller no
     # las ve en el análisis estático.

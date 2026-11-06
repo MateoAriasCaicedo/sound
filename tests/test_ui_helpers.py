@@ -66,3 +66,32 @@ def test_standard_wave_is_the_same_for_every_song_and_not_flat():
     assert len(widgets.STANDARD_LEVELS) == widgets.MAX_BARS
     assert min(widgets.STANDARD_LEVELS) > widgets.FLAT_LEVEL
     assert max(widgets.STANDARD_LEVELS) - min(widgets.STANDARD_LEVELS) > 0.3
+
+
+def test_wheel_steps_understands_notches_and_fine_scrolling():
+    from app.ui.main import App
+
+    class Event:
+        def __init__(self, delta):
+            self.delta = delta
+
+    assert App._wheel_steps(Event(-120)) == 1
+    assert App._wheel_steps(Event(-240)) == 2
+    assert App._wheel_steps(Event(120)) == -1
+    assert App._wheel_steps(Event(-30)) == 1   # rueda de alta resolución: al menos una unidad
+    assert App._wheel_steps(Event(30)) == -1
+    assert App._wheel_steps(Event(0)) == 0
+
+
+def test_touchpad_deltas_unpack_both_axes():
+    from app.ui.widgets import touchpad_deltas
+
+    class Event:
+        def __init__(self, delta):
+            self.delta = delta
+
+    assert touchpad_deltas(Event(50)) == (0, 50)
+    assert touchpad_deltas(Event((0 << 16) | 0xFFEC)) == (0, -20)
+    assert touchpad_deltas(Event((5 << 16) | 0xFFEC)) == (5, -20)
+    assert touchpad_deltas(Event(0xFFFFFFEC)) == (-1, -20)  # Tkinter a veces lo da negativo
+    assert touchpad_deltas(Event(0)) == (0, 0)

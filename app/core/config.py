@@ -53,6 +53,8 @@ DB_PATH = _env_path("SOUND_DB") or DATA_DIR / "library.db"
 GENRE_CACHE = _env_path("SOUND_GENRE_CACHE") or DATA_DIR / "genres_cache.json"
 LOG_PATH = _env_path("SOUND_LOG") or DATA_DIR / "sound.log"
 WAVE_DIR = _env_path("SOUND_WAVE_DIR") or DATA_DIR / "cache" / "waves"
+COVER_DIR = _env_path("SOUND_COVER_DIR") or DATA_DIR / "cache" / "covers"
+LYRICS_DIR = _env_path("SOUND_LYRICS_DIR") or DATA_DIR / "cache" / "lyrics"
 LOUDNESS_CACHE = _env_path("SOUND_LOUDNESS_CACHE") or DATA_DIR / "cache" / "loudness.json"
 UI_PREFS = _env_path("SOUND_UI_PREFS") or DATA_DIR / "ui_prefs.json"
 UI_SESSION = _env_path("SOUND_UI_SESSION") or DATA_DIR / "ui_session.json"
@@ -74,7 +76,8 @@ NEEDS_NODE = True  # YouTube exige un runtime JS; se avisa si falta
 def prepare() -> list[str]:
     """Crea las carpetas que la app necesita antes de abrir el registro o la base de datos."""
     created = []
-    for path in (DATA_DIR, MUSIC_DIR, WAVE_DIR, LOUDNESS_CACHE.parent, LOG_PATH.parent):
+    for path in (DATA_DIR, MUSIC_DIR, WAVE_DIR, COVER_DIR, LYRICS_DIR, LOUDNESS_CACHE.parent,
+                 LOG_PATH.parent):
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
             created.append(str(path))
@@ -290,3 +293,17 @@ def data_summary() -> dict[str, str]:
         "base de datos": str(DB_PATH),
         "registro": str(LOG_PATH),
     }
+
+
+def icon_path() -> Path | None:
+    """Icono de la ventana: empaquetado con la app o en el repositorio.
+
+    PyInstaller copia `packaging/sound.ico` dentro de `_internal/packaging`; en desarrollo
+    está en la raíz del proyecto. En la app instalada `ROOT` apunta a `_internal`.
+    """
+    for base in (ROOT, APP_HOME):
+        for name in ("packaging/sound.ico", "sound.ico"):
+            candidate = base / name
+            if candidate.exists():
+                return candidate
+    return None

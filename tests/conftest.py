@@ -4,6 +4,7 @@ import shutil
 import struct
 import tempfile
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
@@ -67,3 +68,5 @@ def isolated_state(tmp_path, monkeypatch):
 
     # Guardia: ningún test usa la red sin querer (los que simulan YouTube lo sustituyen por su cuenta).
     monkeypatch.setattr(ytsearch, "_client", no_network)
+    # Cada test empieza con la caché de búsquedas vacía: nada de resultados de otro test.
+    monkeypatch.setattr(ytsearch, "_songs_cache", OrderedDict())

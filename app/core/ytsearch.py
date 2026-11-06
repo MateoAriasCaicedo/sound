@@ -1,4 +1,7 @@
 import re
+import threading
+import time
+from collections import OrderedDict
 
 from ytmusicapi import YTMusic
 from ytmusicapi.navigation import (
@@ -12,13 +15,72 @@ from ytmusicapi.navigation import (
 from ytmusicapi.parsers.browsing import parse_playlist
 
 _yt: YTMusic | None = None
+_yt_lock = threading.Lock()
+
+# Últimas búsquedas, para repetirlas al instante y para enseñar «pre-resultados» mientras
+# se escribe. Vive solo en memoria: es una caché de conveniencia, no un historial.
+CACHE_TTL_S = 15 * 60
+CACHE_MAX = 96
+_songs_cache: OrderedDict[str, tuple[float, int, list[dict]]] = OrderedDict()
+_cache_lock = threading.Lock()
+
+_warmed = False
+_warm_lock = threading.Lock()
 
 
 def _client() -> YTMusic:
     global _yt
     if _yt is None:
-        _yt = YTMusic()
+        with _yt_lock:
+            if _yt is None:
+                _yt = YTMusic()
     return _yt
+
+
+def _query_key(query: str) -> str:
+    """Clave de caché: sin espacios de más ni mayúsculas, pero sin tocar tildes ni símbolos."""
+    return " ".join(query.casefold().split())
+
+
+def warm_up() -> None:
+    """Abre la conexión con YouTube Music para que la primera búsqueda no pague el TLS.
+
+    Se lanza al arrancar la ventana, en segundo plano: si no hay red, no pasa nada.
+    """
+    global _warmed
+    with _warm_lock:
+        if _warmed:
+            return
+        _warmed = True
+    try:
+        _client().get_search_suggestions("a")
+    except Exception:  # noqa: BLE001 - es solo una optimización
+        pass
+
+
+def cached_songs(query: str) -> tuple[str, list[dict]] | None:
+    """Resultados ya descargados para esta búsqueda o para el prefijo más largo escrito antes.
+
+    Devuelve (consulta de la que salieron, canciones) o None. Es una lectura en memoria pensada
+    para pintar pre-resultados al instante mientras llega la búsqueda definitiva.
+    """
+    key = _query_key(query)
+    if not key:
+        return None
+    now = time.monotonic()
+    with _cache_lock:
+        exact = _songs_cache.get(key)
+        if exact is not None and now - exact[0] < CACHE_TTL_S:
+            _songs_cache.move_to_end(key)
+            return key, [dict(t) for t in exact[2]]
+        best_key, best = "", None
+        for cached, (saved, _limit, tracks) in _songs_cache.items():
+            if (len(cached) >= 3 and len(cached) > len(best_key)
+                    and key.startswith(cached) and now - saved < CACHE_TTL_S):
+                best_key, best = cached, tracks
+        if best is None:
+            return None
+        return best_key, [dict(t) for t in best]
 
 
 def _track(item: dict) -> dict | None:
@@ -45,8 +107,23 @@ def _cover_url(thumbnails: list[dict] | None) -> str | None:
 
 
 def search_songs(query: str, limit: int = 20) -> list[dict]:
+    key = _query_key(query)
+    now = time.monotonic()
+    if key:
+        with _cache_lock:
+            entry = _songs_cache.get(key)
+            if entry is not None and now - entry[0] < CACHE_TTL_S and entry[1] >= limit:
+                _songs_cache.move_to_end(key)
+                return [dict(t) for t in entry[2][:limit]]
     results = _client().search(query, filter="songs", limit=limit)
-    return [t for t in map(_track, results) if t][:limit]  # la API devuelve páginas enteras, no el tope exacto
+    tracks = [t for t in map(_track, results) if t][:limit]  # la API devuelve páginas enteras, no el tope exacto
+    if key:
+        with _cache_lock:
+            _songs_cache[key] = (now, limit, [dict(t) for t in tracks])
+            _songs_cache.move_to_end(key)
+            while len(_songs_cache) > CACHE_MAX:
+                _songs_cache.popitem(last=False)
+    return tracks
 
 
 def search_playlists(genre: str, limit: int = 10) -> list[dict]:

@@ -1,6 +1,6 @@
 import random
 
-from app.core.autoqueue import backup_queue
+from app.core.autoqueue import backup_queue, reason_for
 
 
 def song(vid, artist, genre):
@@ -60,3 +60,26 @@ def test_artists_are_spread_not_chained():
 
 def test_empty_library_gives_empty_queue():
     assert backup_queue([], "Rock", set()) == []
+
+
+def test_reason_for_explains_the_backup_selection():
+    assert reason_for(song("a", "A", "Rock"), "rock") == "mismo género"
+    assert reason_for(song("b", "B", "Pop"), "Rock") == "otro género"
+    assert reason_for(song("c", "C", "Rock"), None) == "de tu biblioteca"
+
+
+def test_energy_filter_avoids_extreme_jumps_when_there_are_options():
+    library = [song(f"a{i}", f"A{i}", "Rock") for i in range(8)]
+    energy = {f"a{i}": (0.9 if i % 2 else 0.2) for i in range(8)}
+    queue = backup_queue(library, "Rock", set(), n=4, rng=random.Random(1),
+                         energy=lambda t: energy[t["video_id"]], target_energy=0.85)
+    assert len(queue) == 4
+    assert all(energy[t["video_id"]] > 0.8 for t in queue)
+
+
+def test_energy_filter_keeps_unknown_tracks_and_small_pools():
+    library = [song(f"a{i}", f"A{i}", "Rock") for i in range(3)]
+    assert len(backup_queue(library, "Rock", set(), n=3, energy=lambda _t: 0.9,
+                            target_energy=0.1)) == 3
+    assert len(backup_queue(library, "Rock", set(), n=3, energy=lambda _t: None,
+                            target_energy=0.1)) == 3

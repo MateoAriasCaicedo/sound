@@ -84,6 +84,16 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 ## En la ventana
 
 - **Selección múltiple**: clic, `Ctrl+clic` y `Mayús+clic`; `Ctrl+A` selecciona la vista actual.
+- **Volver al inicio**: un clic en «Sound», arriba a la izquierda, cierra páginas y la cola, limpia
+  la búsqueda y vuelve a toda la biblioteca.
+- **Búsqueda instantánea**: al escribir tres letras empieza a buscar en YouTube Music; los
+  resultados ya vistos aparecen al momento como pre-resultados y las primeras 20 canciones llegan
+  con una sola petición.
+- **Lista o cuadrícula**: el icono de la esquina superior derecha de la lista (o `Ctrl+Shift+L`)
+  alterna la vista; la cuadrícula muestra la portada de cada canción y se recuerda al cerrar.
+- **Rueda del ratón y touchpad**: el gesto de dos dedos del touchpad y la rueda desplazan lo que
+  hay bajo el puntero, incluida la lista, la cuadrícula, los géneros, «A continuación», Ajustes y
+  las barras de desplazamiento.
 - **Me gusta**: clic derecho → «Me gusta» (o `Ctrl+L`).
 - **Duplicados y etiquetas**: clic derecho en la lista.
 - **Archivos incompletos**: se marcan con `✗` y se conservan; clic derecho → «Volver a descargar
@@ -91,13 +101,13 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Música por frase**, **Importar** y **Descargas**: páginas dentro de la misma ventana.
   `Esc` o «← Biblioteca» vuelve.
 - **Ajustes** (icono de engranaje o `Ctrl+,`): tema, animaciones, orden, repetición, cola
-  automática, transición, normalización, cookies, actualización automática de yt-dlp, inicio
-  con Windows, mantenimiento y lista de atajos.
-- **Más acciones** (icono «⋯»): duplicados, exportar M3U, archivos que faltan,
-  normalización y diagnóstico sin abrir el menú contextual.
+  automática, transición, normalización, letras, cookies, actualización automática de yt-dlp,
+  inicio con Windows, mantenimiento y lista de atajos.
+- **Más acciones** (icono de caja de herramientas, junto al de lista/cuadrícula): duplicados,
+  exportar M3U, archivos que faltan, normalización y diagnóstico sin abrir el menú contextual.
 - **Atajos**: `Ctrl+F` buscar, `Ctrl+G` música por frase, `Ctrl+L` Me gusta,
-  `Ctrl+A` seleccionar todo, `Ctrl+M` silenciar, `Ctrl+↑/↓` volumen, `Espacio`
-  reproducir/pausar, `Supr` eliminar y `Esc` volver o cerrar «A continuación».
+  `Ctrl+A` seleccionar todo, `Ctrl+Shift+L` lista/cuadrícula, `Ctrl+M` silenciar, `Ctrl+↑/↓`
+  volumen, `Espacio` reproducir/pausar, `Supr` eliminar y `Esc` volver o cerrar «A continuación».
 - **Cookies de YouTube**: en Descargas, para resolver el aviso anti-bot tanto al descargar como al
   reproducir por streaming. Cambiar de navegador las recarga sin reiniciar.
 - **Poco espacio en disco**: si quedan menos de 2 GB, las descargas pasan a una a la vez; por
@@ -107,6 +117,12 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
   dejaste» y no suena nada hasta que pulses play.
 - **Exportar y limpiar**: clic derecho en la lista.
 - **Normalizar volumen (ReplayGain)**: clic derecho → «Normalizar volumen» (necesita ffmpeg).
+- **Letras**: pestaña «Letra» en «A continuación». Se activan en Ajustes → Reproducción y se
+  buscan en LRCLIB, así que necesitan internet; se guardan en caché para escucharlas sin conexión.
+- **La interfaz sigue la música**: la onda y el ecualizador usan el volumen real de la canción, y
+  el color de la ventana se adelanta a la portada de la siguiente antes del crossfade. La mezcla
+  se acorta o alarga según la energía de las dos canciones, y la cola automática evita saltos
+  bruscos y explica por qué eligió cada una.
 - **Actualizar yt-dlp**: botón en Descargas, sin cerrar la ventana (reinicia después).
 
 ## Dónde se guarda todo
@@ -119,6 +135,7 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 | `genres_cache.json` | `SOUND_GENRE_CACHE` | Géneros de YouTube Music en caché |
 | `sound.log` | `SOUND_LOG` | Registro de errores (rota a 512 KB, 2 copias) |
 | `cache\waves\` | `SOUND_WAVE_DIR` | Onda real de cada canción |
+| `cache\lyrics\` | `SOUND_LYRICS_DIR` | Letras consultadas, si se activan |
 | `ui_prefs.json` | `SOUND_UI_PREFS` | Tema, volumen, repetición, crossfade, cookies… |
 | `ui_session.json` | `SOUND_UI_SESSION` | Canción, posición y cola de la última sesión |
 | `cache\loudness.json` | `SOUND_LOUDNESS_CACHE` | Ganancia de volumen medida por canción |
@@ -134,6 +151,7 @@ archivos de estado se escriben de forma atómica para que un corte no los corrom
 | `SOUND_COOKIES_FROM_BROWSER` | — | `firefox`, `chrome`, `edge`… para la CLI |
 | `SOUND_DATA_DIR` | `%LOCALAPPDATA%\Sound` | Carpeta de datos |
 | `SOUND_MUSIC_DIR` | `%USERPROFILE%\Music\Sound` | Carpeta de música |
+| `SOUND_LYRICS_DIR` | `%LOCALAPPDATA%\Sound\cache\lyrics` | Caché de letras |
 | `SOUND_PORTABLE` | — | `1` para el modo portable |
 | `SOUND_NO_MIGRATE` | — | `1` para no migrar la disposición antigua |
 

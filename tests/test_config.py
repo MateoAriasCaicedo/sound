@@ -20,6 +20,7 @@ def test_prepare_creates_every_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(config, "MUSIC_DIR", tmp_path / "music")
     monkeypatch.setattr(config, "WAVE_DIR", tmp_path / "data" / "waves")
+    monkeypatch.setattr(config, "COVER_DIR", tmp_path / "data" / "covers")
     monkeypatch.setattr(config, "LOUDNESS_CACHE", tmp_path / "data" / "loudness.json")
     monkeypatch.setattr(config, "LOG_PATH", tmp_path / "data" / "sound.log")
 
@@ -28,6 +29,14 @@ def test_prepare_creates_every_folder(tmp_path, monkeypatch):
     assert (tmp_path / "data").is_dir()
     assert (tmp_path / "music").is_dir()
     assert (tmp_path / "data" / "waves").is_dir()
+    assert (tmp_path / "data" / "covers").is_dir()
+
+
+def test_icon_path_points_to_the_packaged_icon():
+    icon = config.icon_path()
+    assert icon is not None
+    assert icon.name == "sound.ico"
+    assert icon.exists()
 
 
 def test_migrate_moves_music_and_rewrites_paths(tmp_path, monkeypatch):

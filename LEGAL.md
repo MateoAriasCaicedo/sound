@@ -20,6 +20,12 @@ de YouTube (restricciones de edad o comprobaciones anti-bot). Las cookies **no s
 ningún servidor de Sound**: se pasan directamente a yt-dlp en el equipo del usuario. Si no
 quieres usar cookies, deja esa opción vacía.
 
+## Letras
+
+La opción de letras consulta LRCLIB, un servicio de terceros, y muestra el texto que ese servicio
+devuelve. Sound no aloja ni distribuye letras: el texto pertenece a sus autores y su uso puede
+estar sujeto a derechos de autor. Si no quieres mostrarlas, deja la opción desactivada.
+
 ## Marcas
 
 YouTube y YouTube Music son marcas de Google LLC. Sound no está afiliado, patrocinado ni
