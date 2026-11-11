@@ -8,6 +8,10 @@ falta, de modo que el coste no depende del tamaño de la biblioteca.
 La selección se comporta como un `Listbox` extendido (clic, Ctrl+clic y Mayús+clic) y la
 ventana principal sigue usando el `Treeview` oculto como fuente de verdad: este widget solo
 refleja y modifica esa selección.
+
+Una tarjeta puede representar varias filas de la tabla: las canciones de un mismo álbum se
+juntan en una sola tarjeta (ver `group_albums`). Por eso la cuadrícula traduce siempre entre
+sus tarjetas y las filas del `Treeview` (`members`).
 """
 import io
 import math
@@ -16,13 +20,61 @@ from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
+from ..core.filters import fold
 from .theme import blend, readable_on, seed_color
-from .widgets import SS, _rounded_mask, bind_touchpad, elide, touchpad_deltas
+from .widgets import HEART, SS, _rounded_mask, bind_touchpad, elide, touchpad_deltas
 
 THUMB_CACHE = 120  # miniaturas en memoria
 SOURCE_CACHE = 48  # imágenes originales (recortadas a 512 px) para rehacer miniaturas
 CHIP = "#101014"    # fondo de los indicadores sobre la portada: opaco y legible en ambos temas
-HEART = "#ff7a9a"   # «Me gusta»: rosado sobre la pastilla oscura, en los dos temas
+HEART_OFF = "#d9d9df"  # corazón vacío al pasar el ratón
+
+
+def album_key(t: dict) -> tuple[str, str] | None:
+    """Identidad del álbum de una canción descargada: (álbum, artista), sin tildes ni mayúsculas.
+
+    Las canciones que no están en disco (resultados de YouTube) no se agrupan nunca.
+    """
+    if "path" not in t:
+        return None
+    album = fold(t.get("album") or "")
+    if not album:
+        return None
+    return album, fold(t.get("artist") or "")
+
+
+def group_albums(rows: list[dict], min_size: int = 2) -> tuple[list[dict], list[tuple[int, ...]]]:
+    """Junta en una tarjeta las canciones de un mismo álbum.
+
+    Devuelve (tarjetas, filas): cada tarjeta es una canción (el mismo dict de `rows`) o un
+    álbum (dict con la clave "_album"), y `filas[i]` son los índices de `rows` que representa
+    la tarjeta i. El álbum ocupa el sitio de su primera canción; un álbum del que solo hay una
+    canción sigue mostrándose como canción. Es una función pura para poder probarla sin Tk.
+    """
+    groups: dict[tuple[str, str], list[int]] = {}
+    keys = [album_key(t) for t in rows]
+    for i, key in enumerate(keys):
+        if key is not None:
+            groups.setdefault(key, []).append(i)
+    cards: list[dict] = []
+    members: list[tuple[int, ...]] = []
+    done: set[tuple[str, str]] = set()
+    for i, (t, key) in enumerate(zip(rows, keys)):
+        group = groups.get(key) if key is not None else None
+        if group is None or len(group) < min_size:
+            cards.append(t)
+            members.append((i,))
+            continue
+        if key in done:
+            continue
+        done.add(key)
+        tracks = [rows[j] for j in group]
+        first = tracks[0]
+        cards.append({"_album": key, "_tracks": tracks, "video_id": first["video_id"],
+                      "path": first.get("path"), "title": first.get("album") or "",
+                      "artist": first.get("artist") or ""})
+        members.append(tuple(group))
+    return cards, members
 
 
 def grid_metrics(width: int, k: float) -> tuple[int, int, int, int, int, int, int, int]:
@@ -47,12 +99,17 @@ def grid_metrics(width: int, k: float) -> tuple[int, int, int, int, int, int, in
 
 class CoverGrid(tk.Canvas):
     def __init__(self, master, anim, k: float, fonts: dict, on_select=None,
-                 on_activate=None, on_context=None, on_need_cover=None) -> None:
+                 on_activate=None, on_context=None, on_need_cover=None, on_like=None) -> None:
         super().__init__(master, highlightthickness=0, bd=0, takefocus=1)
         self.anim, self.k, self.fonts = anim, k, fonts
         self.on_select, self.on_activate = on_select, on_activate
         self.on_context, self.on_need_cover = on_context, on_need_cover
+        self.on_like = on_like
         self.items: list[dict] = []
+        self.members: list[tuple[int, ...]] = []  # filas del Treeview de cada tarjeta
+        self._row_item: dict[int, int] = {}       # fila del Treeview → tarjeta
+        self._card_vids: list[frozenset[str]] = []
+        self._hearts: dict[int, tuple[int, int, int, int]] = {}  # zona clicable del corazón
         self.sel: set[int] = set()
         self.anchor: int | None = None
         self.hovered: int | None = None
@@ -109,13 +166,39 @@ class CoverGrid(tk.Canvas):
         if view_kind is not None:
             self._view_kind = view_kind
 
-    def set_items(self, items: list[dict]) -> None:
+    def set_items(self, items: list[dict], members: list[tuple[int, ...]] | None = None) -> None:
+        """`members[i]`: filas del Treeview que representa la tarjeta i (por defecto, la i)."""
         self.items = list(items)
-        self._vid_index = {t.get("video_id"): i for i, t in enumerate(self.items)
-                           if t.get("video_id")}
+        self.members = list(members) if members is not None else [(i,) for i in range(len(items))]
+        self._row_item = {row: i for i, rows in enumerate(self.members) for row in rows}
+        self._card_vids = [frozenset(x.get("video_id") for x in self.tracks_of(i)
+                                     if x.get("video_id")) for i in range(len(self.items))]
+        self._vid_index = {vid: i for i, vids in enumerate(self._card_vids) for vid in vids}
         self.sel.clear()
         self.anchor = self.hovered = None
         self._layout()
+        self._rehover()
+
+    def _rehover(self) -> None:
+        """Tras repintar todo, la tarjeta bajo el puntero sigue resaltada (y con su corazón)."""
+        try:
+            if not self.winfo_ismapped():
+                return
+            px = self.winfo_pointerx() - self.winfo_rootx()
+            py = self.winfo_pointery() - self.winfo_rooty()
+        except tk.TclError:
+            return
+        if 0 <= px < self.winfo_width() and 0 <= py < self.winfo_height():
+            self._set_hover(self._hit(self.canvasx(px), self.canvasy(py)))
+
+    def tracks_of(self, i: int) -> list[dict]:
+        """Las canciones de la tarjeta i: una, o todas las del álbum."""
+        card = self.items[i]
+        return list(card["_tracks"]) if "_album" in card else [card]
+
+    @staticmethod
+    def is_album(card: dict) -> bool:
+        return "_album" in card
 
     def set_playing(self, video_id: str | None) -> None:
         if video_id == self._playing:
@@ -171,7 +254,7 @@ class CoverGrid(tk.Canvas):
             self._paint_one(i)
         if self._range is not None:  # da otra oportunidad a las tarjetas que esperaban turno
             for j in range(*self._range):
-                self._want_cover(self.items[j])
+                self._want_cover(self._cover_track(j))
 
     # ---------- apariencia ----------
     def restyle(self, **colors) -> None:
@@ -257,6 +340,7 @@ class CoverGrid(tk.Canvas):
                 self._paint_one(i)
 
     def _forget(self, i: int) -> None:
+        self._hearts.pop(i, None)
         removed = set(self._cards.pop(i, ()))
         for item in removed:
             self.delete(item)
@@ -277,31 +361,46 @@ class CoverGrid(tk.Canvas):
 
         selected = i in self.sel
         hovered = i == self.hovered
+        album = self.is_album(t)
         if selected or hovered:
             color = c["sel"] if selected else c["hover"]
             items.append(self.create_image(x, y, anchor="nw",
                                            image=self._pill(cell, card_h, color)))
             self.tag_lower(items[-1])
 
-        items.append(self.create_image(cx, cy, anchor="nw", image=self._photo(t, cover)))
-        self._want_cover(t)
+        if album:  # dos portadas asoman por detrás: es un álbum, no una canción
+            for step, mix in ((2, 0.20), (1, 0.36)):
+                inset, rise = int(9 * k) * step, int(4 * k) * step
+                items.append(self.create_image(
+                    cx + inset, cy - rise, anchor="nw",
+                    image=self._pill(cover - 2 * inset, int(24 * k), blend(c["bg"], c["fg"], mix))))
 
-        vid = t.get("video_id")
-        playing = bool(vid and vid == self._playing)
+        items.append(self.create_image(cx, cy, anchor="nw", image=self._photo(t, cover)))
+        self._want_cover(self._cover_track(i))
+
+        vids = self._card_vids[i] if i < len(self._card_vids) else frozenset()
+        playing = bool(self._playing and self._playing in vids)
         if playing:
             ring = self._ring(cover, max(2, int(9 * k)), max(2, int(2 * k)))
             items.append(self.create_image(cx, cy, anchor="nw", image=ring))
             items.extend(self._eq_bars(cx, cy, cover))
             self.anim.wake()
 
-        liked = bool(vid and vid in self._liked)
-        if liked:
+        # corazón: siempre si está en «Me gusta»; vacío al pasar el ratón, para marcarla
+        liked = bool(vids) and vids <= self._liked
+        if (liked or hovered) and not self._is_remote(t) and self.on_like is not None:
+            badge, rect = self._badge("♥" if liked else "♡", cx + cover - int(5 * k),
+                                      cy + int(5 * k), anchor="ne",
+                                      color=HEART if liked else HEART_OFF, wide=True)
+            items.extend(badge)
+            self._hearts[i] = rect
+        elif liked:
             items.extend(self._badge("♥", cx + cover - int(5 * k), cy + int(5 * k),
-                                     anchor="ne", color=HEART))
-        state = self._state_of(t)
+                                     anchor="ne", color=HEART)[0])
+        state = self._state_of(t) or (f"{len(vids)} canciones" if album else "")
         if state:
             items.extend(self._badge(state, cx + cover - int(5 * k),
-                                     cy + cover - int(5 * k), anchor="se"))
+                                     cy + cover - int(5 * k), anchor="se")[0])
 
         title_y = cy + cover + int(5 * k)
         tw = cover
@@ -314,6 +413,11 @@ class CoverGrid(tk.Canvas):
             self.fonts["small"], t.get("artist") or "", tw), font=self.fonts["small"],
             fill=c["faint"] if self._is_remote(t) and not selected and not hovered else c["dim"]))
         self._cards[i] = items
+
+    def _cover_track(self, i: int) -> dict:
+        """La canción cuya portada representa la tarjeta (la primera del álbum)."""
+        card = self.items[i]
+        return card["_tracks"][0] if self.is_album(card) else card
 
     def _pill(self, w: int, h: int, color: str) -> ImageTk.PhotoImage:
         key = (w, h, color)
@@ -346,17 +450,24 @@ class CoverGrid(tk.Canvas):
             self._chips[key] = ImageTk.PhotoImage(img, master=self)
         return self._chips[key]
 
-    def _badge(self, text: str, x: int, y: int, anchor: str, color: str | None = None):
-        """Texto pequeño sobre una pastilla oscura, legible encima de cualquier portada."""
-        font = self.fonts["small"]
+    def _badge(self, text: str, x: int, y: int, anchor: str, color: str | None = None,
+               wide: bool = False):
+        """Texto pequeño sobre una pastilla oscura, legible encima de cualquier portada.
+
+        Devuelve (elementos del Canvas, rectángulo que ocupa). `wide` agranda la pastilla
+        para que sea fácil de pulsar.
+        """
+        font = self.fonts["body" if wide else "small"]
         pad = int(6 * self.k)
-        w = max(int(18 * self.k), font.measure(text) + pad * 2)
-        h = int(18 * self.k)
+        side = int((26 if wide else 18) * self.k)
+        w = max(side, font.measure(text) + pad * 2)
+        h = side
         left = x - w if anchor in ("ne", "se") else x
         top = y - h if anchor in ("se", "sw") else y
-        return [self.create_image(left, top, anchor="nw", image=self._chip(w, h)),
-                self.create_text(left + w // 2, top + h // 2, text=text, font=font,
-                                 fill=readable_on(color or self.c["fg"], CHIP))]
+        items = [self.create_image(left, top, anchor="nw", image=self._chip(w, h)),
+                 self.create_text(left + w // 2, top + h // 2, text=text, font=font,
+                                  fill=readable_on(color or self.c["fg"], CHIP))]
+        return items, (left, top, left + w, top + h)
 
     def _eq_bars(self, cx: int, cy: int, cover: int) -> list[int]:
         k = self.k
@@ -427,6 +538,8 @@ class CoverGrid(tk.Canvas):
         return "path" not in t
 
     def _state_of(self, t: dict) -> str:
+        if self.is_album(t):
+            return "✗" if any(x.get("video_id") in self._damaged for x in t["_tracks"]) else ""
         vid = t.get("video_id") or ""
         if vid in self._damaged:
             return "✗"
@@ -436,17 +549,19 @@ class CoverGrid(tk.Canvas):
 
     # ---------- interacción ----------
     def selection(self) -> tuple[str, ...]:
-        return tuple(str(i) for i in sorted(self.sel))
+        """Filas del Treeview seleccionadas: un álbum aporta todas sus canciones."""
+        rows = sorted({row for i in self.sel if i < len(self.members) for row in self.members[i]})
+        return tuple(str(row) for row in rows)
 
     def select(self, iids) -> None:
-        """Selección programática (la que manda el Treeview); no dispara `on_select`."""
+        """Selección programática (filas del Treeview, que manda); no dispara `on_select`."""
         new = set()
         for value in iids:
             try:
-                i = int(value)
+                i = self._row_item.get(int(value))
             except (TypeError, ValueError):
                 continue
-            if 0 <= i < len(self.items):
+            if i is not None:
                 new.add(i)
         if new == self.sel:
             return
@@ -456,6 +571,12 @@ class CoverGrid(tk.Canvas):
                 self._paint_one(i)
         if self.hovered in new and self.hovered is not None:
             self._paint_one(self.hovered)
+
+    def see_row(self, row: int) -> None:
+        """Desplaza hasta la tarjeta que contiene la fila `row` del Treeview."""
+        i = self._row_item.get(row)
+        if i is not None:
+            self.see(i)
 
     def see(self, i: int) -> None:
         if not 0 <= i < len(self.items):
@@ -496,10 +617,18 @@ class CoverGrid(tk.Canvas):
             if j is not None and self._in_range(j):
                 self._paint_one(j)
 
+    def _on_heart(self, i: int, x: float, y: float) -> bool:
+        rect = self._hearts.get(i)
+        return rect is not None and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
+
     def _press(self, e) -> None:
         self.focus_set()
-        i = self._hit(self.canvasx(e.x), self.canvasy(e.y))
+        x, y = self.canvasx(e.x), self.canvasy(e.y)
+        i = self._hit(x, y)
         if i is None:
+            return
+        if self.on_like is not None and self._on_heart(i, x, y):
+            self.on_like(i)  # marcar no cambia la selección
             return
         ctrl = bool(e.state & 0x4)
         shift = bool(e.state & 0x1)
@@ -522,7 +651,10 @@ class CoverGrid(tk.Canvas):
             self.on_select(self.selection())
 
     def _double(self, e) -> None:
-        i = self._hit(self.canvasx(e.x), self.canvasy(e.y))
+        x, y = self.canvasx(e.x), self.canvasy(e.y)
+        i = self._hit(x, y)
+        if i is not None and self._on_heart(i, x, y):
+            return  # doble clic en el corazón: marcar y desmarcar, no reproducir
         if i is not None and self.on_activate is not None:
             self.on_activate(i)
 

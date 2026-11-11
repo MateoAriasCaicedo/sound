@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageTk
 from ..core.waveform import level_at, resample
 from .anim import Animator, ease_in_out, ease_out
 from .icons import icon_mask
-from .theme import _rgb, blend, seed_color
+from .theme import _rgb, blend, readable_on, seed_color
 
 SS = 4
 MAX_BARS = 240
@@ -653,27 +653,107 @@ class SwapText:
         self.c.itemconfigure(self.item, fill=fg)
 
 
+HEART = "#ff7a9a"  # «Me gusta» marcado: el mismo rosado que en las portadas
+
+
 class NowPlaying(tk.Canvas):
-    def __init__(self, master, anim: Animator, k: float, fonts: dict) -> None:
+    """Título y artista de la canción que suena, con su corazón de «Me gusta» al lado."""
+
+    def __init__(self, master, anim: Animator, k: float, fonts: dict, on_like=None) -> None:
         h = int(44 * k)
         super().__init__(master, height=h, width=int(120 * k), highlightthickness=0, bd=0)
+        self.anim, self.k, self.on_like = anim, k, on_like
         self.title = SwapText(self, anim, fonts["strong"], 0, int(h * 0.30), int(8 * k))
         self.artist = SwapText(self, anim, fonts["small"], 0, int(h * 0.74), int(6 * k))
+        self.c = dict(bg="#000000", fg="#ffffff", dim="#888888")
+        self.liked: bool | None = None  # None: sin corazón (la canción no está en la biblioteca)
+        self.hot = self.pop = 0.0
+        self.heart_size = int(18 * k)
+        self.heart_box = int(self.heart_size * 1.5)  # hueco para el «latido» al marcarla
+        self.heart_gap = int(10 * k)
+        self._masks = {name: icon_mask(name, self.heart_size) for name in ("heart", "heart_fill")}
+        self._heart = _Painted(self, 0, h // 2, "w")
+        self.itemconfigure(self._heart.item, state="hidden")
+        self.tag_bind(self._heart.item, "<Enter>", lambda e: self._hover(1.0))
+        self.tag_bind(self._heart.item, "<Leave>", lambda e: self._hover(0.0))
+        self.tag_bind(self._heart.item, "<ButtonRelease-1>", self._click)
         self.bind("<Configure>", self._resized)
 
     def _resized(self, e) -> None:
         for line in (self.title, self.artist):
-            line.max_w = e.width
+            line.max_w = max(1, e.width - self.heart_gap - self.heart_box)
             line.refit()
+        self._place_heart()
 
     def set(self, title: str, artist: str) -> None:
         self.title.set(title)
         self.artist.set(artist)
+        self._place_heart()
+
+    def set_liked(self, liked: bool | None, pop: bool = False) -> None:
+        """True/False: corazón lleno o vacío; None: sin corazón. `pop` lo hace latir."""
+        changed = liked != self.liked
+        self.liked = liked
+        if liked is None:
+            self.itemconfigure(self._heart.item, state="hidden")
+            return
+        self.itemconfigure(self._heart.item, state="normal")
+        self._place_heart()
+        if pop and liked:
+            self.anim.tween(("pop", id(self)), 360, self._set_pop, done=lambda: self._set_pop(0.0))
+        elif changed or self._heart.photo is None:
+            self._render_heart()
 
     def restyle(self, bg: str, fg: str, dim: str) -> None:
+        self.c.update(bg=bg, fg=fg, dim=dim)
         self.configure(bg=bg)
         self.title.recolor(fg, bg)
         self.artist.recolor(dim, bg)
+        self._render_heart()
+
+    # ---------- corazón ----------
+    def _text_width(self) -> int:
+        widths = [line.font.measure(line._fit(line.text)) for line in (self.title, self.artist)]
+        return max(widths)
+
+    def _place_heart(self) -> None:
+        room = max(0, self.winfo_width() - self.heart_box)
+        x = min(room, self._text_width() + self.heart_gap)
+        self.coords(self._heart.item, x, self.winfo_reqheight() // 2)
+
+    def _render_heart(self) -> None:
+        if self.liked is None:
+            return
+        c, box = self.c, self.heart_box
+        size = max(4, round(self.heart_size * (1 + 0.3 * math.sin(math.pi * self.pop))))
+        mask = self._masks["heart_fill" if self.liked else "heart"]
+        if size != self.heart_size:
+            mask = mask.resize((size, size), Image.LANCZOS)
+        if self.liked:
+            color = readable_on(HEART, c["bg"], 3.0)  # gráfico, no texto: basta 3:1
+        else:
+            color = blend(c["dim"], c["fg"], self.hot)
+        img = Image.new("RGBA", (box, box), (0, 0, 0, 0))
+        img.alpha_composite(_layer(mask, color), ((box - size) // 2, (box - size) // 2))
+        self._heart.show(img)
+
+    def _set_pop(self, p: float) -> None:
+        self.pop = p
+        self._render_heart()
+
+    def _hover(self, to: float) -> None:
+        self.configure(cursor="hand2" if to else "")
+        start = self.hot
+
+        def step(p: float) -> None:
+            self.hot = start + (to - start) * p
+            self._render_heart()
+
+        self.anim.tween(("hot", id(self)), 120, step)
+
+    def _click(self, _e=None) -> None:
+        if self.on_like is not None and self.liked is not None:
+            self.on_like()
 
 
 class Header(tk.Canvas):

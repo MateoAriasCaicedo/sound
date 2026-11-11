@@ -155,10 +155,30 @@ def _list(d, w):
         _line(d, [(8.5, y), (20, y)], w)
 
 
+def _heart_points() -> list:
+    """Contorno clásico de corazón, escalado a la retícula de 24."""
+    def point(t):
+        x = 16 * math.sin(t) ** 3
+        y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+        return 12 + 0.5 * x, 10.8 - 0.5 * y
+    return _curve(point, 0, 2 * math.pi, 96)
+
+
+def _heart(d, w):
+    """«Me gusta» sin marcar."""
+    _line(d, _heart_points(), w)
+
+
+def _heart_fill(d, w):
+    """«Me gusta» marcado."""
+    _poly(d, _heart_points())
+
+
 _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=_repeat1,
               infinity=_infinity, xfade=_xfade, queue=_queue, volume=_volume, search=_search,
               theme=_theme, downloads=_downloads, note=_note, back=_back, link=_link,
-              more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list)
+              more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list,
+              heart=_heart, heart_fill=_heart_fill)
 
 
 def names() -> list[str]:

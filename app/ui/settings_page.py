@@ -181,16 +181,17 @@ class SettingsPage(Page):
         shortcuts = (
             ("Ctrl+F", "Buscar en la biblioteca"),
             ("Ctrl+G", "Música por frase"),
-            ("Ctrl+L", "Me gusta / quitar Me gusta"),
+            ("Ctrl+L", "Me gusta / quitar Me gusta (selección o lo que suena)"),
+            ("Ctrl+Z", "Deshacer lo último (mientras se ve el aviso)"),
             ("Ctrl+A", "Seleccionar toda la vista"),
             ("Ctrl+Shift+L", "Alternar lista y cuadrícula"),
             ("Ctrl+,  /  F1", "Abrir Ajustes y esta ayuda"),
             ("Ctrl+M", "Silenciar / recuperar el volumen"),
             ("Ctrl+↑ / ↓", "Subir o bajar el volumen"),
             ("Espacio", "Reproducir o pausar"),
-            ("Intro", "Reproducir la canción seleccionada"),
+            ("Intro", "Reproducir la canción seleccionada o abrir el álbum"),
             ("Supr", "Eliminar de la biblioteca / quitar de la cola"),
-            ("Esc", "Volver a la biblioteca o cerrar «A continuación»"),
+            ("Esc", "Volver a la biblioteca, salir del álbum o cerrar «A continuación»"),
         )
         for keys, desc in shortcuts:
             row = tk.Frame(section)
@@ -308,7 +309,7 @@ class SettingsPage(Page):
     # ---------- vista ----------
     def _refresh_labels(self) -> None:
         self.btn_theme.set_text("Oscuro" if self.app.dark else "Claro")
-        self.btn_view.set_text("Cuadrícula" if self.app.view_mode == "grid" else "Lista")
+        self.btn_view.set_text("Cuadrícula" if self.app.view_pref == "grid" else "Lista")
         self.btn_motion.set_text("Activadas" if not self.app.anim.reduced else "Reducidas")
         self.btn_shuffle.set_text("Activado" if self.app.pq.shuffle else "Desactivado")
         repeat = ("Sin repetir", "Repetir lista", "Repetir canción")[self.app.pq.repeat]

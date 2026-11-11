@@ -167,6 +167,8 @@ class EventLoopMixin:
                         row = library.get_track(ev[1])
                         if row:
                             self._upsert_track(row)  # una fila, no toda la biblioteca
+                            if self.cur_track and self.cur_track["video_id"] == ev[1]:
+                                self._refresh_now_heart()  # ya se puede marcar con ♥
                         iid = self.vid_iid.get(ev[1])
                         track = self.lib_by_id.get(ev[1])
                         if iid is not None and track:  # la fila pasa a ser local
