@@ -94,6 +94,12 @@ class EventLoopMixin:
                 elif kind == "thumb":
                     self._thumbs_pending.discard(ev[1])
                     self.grid.set_cover(ev[1], ev[2])
+                elif kind == "thumb_button":
+                    self._on_thumb_button(ev[1])
+                elif kind == "track_numbers":
+                    self._on_track_numbers(ev[1], ev[2])
+                elif kind == "duplicates":
+                    self._offer_duplicates(ev[1])
                 elif kind == "queue_paused":
                     self._queue_paused_changed(ev[1])
                 elif kind == "disk":
@@ -169,6 +175,8 @@ class EventLoopMixin:
                             self._upsert_track(row)  # una fila, no toda la biblioteca
                             if self.cur_track and self.cur_track["video_id"] == ev[1]:
                                 self._refresh_now_heart()  # ya se puede marcar con ♥
+                            if self.now_open:  # puede completar el álbum de lo que suena
+                                self._now_album()
                         iid = self.vid_iid.get(ev[1])
                         track = self.lib_by_id.get(ev[1])
                         if iid is not None and track:  # la fila pasa a ser local
@@ -184,8 +192,8 @@ class EventLoopMixin:
                         self.dl.state.pop(ev[1], None)
                         iid = self.vid_iid.get(ev[1])
                         if iid is not None and self.tree.exists(iid):
-                            self.tree.set(iid, "state", "☁")
-                        self.grid.set_state(ev[1], "☁")
+                            self.tree.set(iid, "state", self._row_state(self.rows[int(iid)]))
+                        self.grid.set_state(ev[1], "")
                         continue
                     else:
                         self._set_state(ev[1], "✗")

@@ -155,6 +155,41 @@ def _list(d, w):
         _line(d, [(8.5, y), (20, y)], w)
 
 
+def _mini(d, w):
+    """Ventana con un recuadro en su esquina: el mini reproductor."""
+    d.rounded_rectangle((3 * SS, 5 * SS, 21 * SS, 19 * SS), radius=2.4 * SS, outline=255, width=w)
+    d.rounded_rectangle((11.5 * SS, 11.5 * SS, 18 * SS, 16.5 * SS), radius=1.2 * SS, fill=255)
+
+
+def _expand(d, w):
+    """Dos flechas hacia las esquinas: volver a la ventana completa."""
+    _line(d, [(13.5, 4.5), (19.5, 4.5), (19.5, 10.5)], w)
+    _line(d, [(19.5, 4.5), (13.5, 10.5)], w)
+    _line(d, [(10.5, 19.5), (4.5, 19.5), (4.5, 13.5)], w)
+    _line(d, [(4.5, 19.5), (10.5, 13.5)], w)
+
+
+def _shrink(d, w):
+    """Dos flechas hacia el centro: salir de la pantalla completa."""
+    _line(d, [(4.5, 10.5), (10.5, 10.5), (10.5, 4.5)], w)
+    _line(d, [(10.5, 10.5), (4.5, 4.5)], w)
+    _line(d, [(19.5, 13.5), (13.5, 13.5), (13.5, 19.5)], w)
+    _line(d, [(13.5, 13.5), (19.5, 19.5)], w)
+
+
+def _stage(d, w):
+    """Un recuadro con una portada y dos líneas de texto: «Reproduciendo» en grande."""
+    d.rounded_rectangle((3 * SS, 5 * SS, 21 * SS, 19 * SS), radius=2.4 * SS, outline=255, width=w)
+    d.rounded_rectangle((6 * SS, 8.5 * SS, 12 * SS, 15.5 * SS), radius=1.2 * SS, fill=255)
+    _line(d, [(14.5, 10), (18, 10)], w)
+    _line(d, [(14.5, 14), (16.8, 14)], w)
+
+
+def _chevron_down(d, w):
+    """Cerrar la pantalla «Reproduciendo»: vuelve hacia el reproductor, abajo."""
+    _line(d, [(5.5, 9), (12, 15.5), (18.5, 9)], w)
+
+
 def _heart_points() -> list:
     """Contorno clásico de corazón, escalado a la retícula de 24."""
     def point(t):
@@ -178,7 +213,8 @@ _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=
               infinity=_infinity, xfade=_xfade, queue=_queue, volume=_volume, search=_search,
               theme=_theme, downloads=_downloads, note=_note, back=_back, link=_link,
               more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list,
-              heart=_heart, heart_fill=_heart_fill)
+              heart=_heart, heart_fill=_heart_fill, mini=_mini, expand=_expand,
+              shrink=_shrink, stage=_stage, chevron_down=_chevron_down)
 
 
 def names() -> list[str]:

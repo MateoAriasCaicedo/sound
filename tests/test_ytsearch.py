@@ -105,3 +105,14 @@ def test_warm_up_no_revienta_sin_red(monkeypatch):
     monkeypatch.setattr(ytsearch, "_client", offline)
 
     ytsearch.warm_up()  # no debe lanzar
+
+
+def test_match_track_numbers_by_id_then_by_base_title():
+    album = [{"video_id": "audio1", "title": "Dreams", "track_no": 2},
+             {"video_id": "audio2", "title": "Go Your Own Way", "track_no": 5},
+             {"video_id": "audio3", "title": "The Chain - 2004 Remaster", "track_no": 7}]
+    tracks = [{"video_id": "audio1", "title": "Dreams (2004 Remaster)"},
+              {"video_id": "clip2", "title": "Go Your Own Way"},
+              {"video_id": "x", "title": "The Chain"},
+              {"video_id": "y", "title": "Otra canción"}]
+    assert ytsearch.match_track_numbers(tracks, album) == {"audio1": 2, "clip2": 5, "x": 7}

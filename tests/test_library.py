@@ -53,7 +53,17 @@ def test_all_tracks_sorted_by_artist_then_title_ignoring_case():
 
     assert [t["video_id"] for t in library.all_tracks()] == ["c", "b", "a"]
     assert set(library.all_tracks()[0]) == {
-        "video_id", "title", "artist", "album", "genre", "duration", "path"}
+        "video_id", "title", "artist", "album", "genre", "duration", "path", "year",
+        "track_no", "added_at"}
+
+
+def test_set_track_numbers_stores_album_position():
+    library.add_track(_track("a"), Path("a.m4a"))
+    library.add_track(_track("b"), Path("b.m4a"))
+    library.set_track_numbers({"a": 3, "b": 1})
+    numbers = {t["video_id"]: t["track_no"] for t in library.all_tracks()}
+    assert numbers == {"a": 3, "b": 1}
+    assert library.get_track("a")["track_no"] == 3
 
 
 def test_database_uses_wal_for_concurrent_readers_and_writers():

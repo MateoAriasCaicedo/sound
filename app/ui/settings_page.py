@@ -185,13 +185,17 @@ class SettingsPage(Page):
             ("Ctrl+Z", "Deshacer lo último (mientras se ve el aviso)"),
             ("Ctrl+A", "Seleccionar toda la vista"),
             ("Ctrl+Shift+L", "Alternar lista y cuadrícula"),
+            ("Ctrl+Shift+M", "Mini reproductor / volver a la ventana"),
+            ("Ctrl+Shift+F", "Reproduciendo en grande: portada, álbum, letra y cola"),
+            ("F11", "Pantalla completa con la vista en grande"),
             ("Ctrl+,  /  F1", "Abrir Ajustes y esta ayuda"),
             ("Ctrl+M", "Silenciar / recuperar el volumen"),
             ("Ctrl+↑ / ↓", "Subir o bajar el volumen"),
             ("Espacio", "Reproducir o pausar"),
             ("Intro", "Reproducir la canción seleccionada o abrir el álbum"),
             ("Supr", "Eliminar de la biblioteca / quitar de la cola"),
-            ("Esc", "Volver a la biblioteca, salir del álbum o cerrar «A continuación»"),
+            ("Esc", "Salir de la vista en grande, volver a la biblioteca, salir del álbum o "
+                    "cerrar «A continuación»"),
         )
         for keys, desc in shortcuts:
             row = tk.Frame(section)

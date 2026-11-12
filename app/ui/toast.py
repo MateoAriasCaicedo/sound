@@ -18,8 +18,13 @@ SLIDE_MS = 200
 
 
 class Toast(tk.Canvas):
-    def __init__(self, master, anim, k: float, fonts: dict) -> None:
+    """`area` es el control sobre el que flota (por defecto, `master`) y `below`, el que debe
+    quedar por encima de él: así sube desde detrás del reproductor y no lo tapa al entrar."""
+
+    def __init__(self, master, anim, k: float, fonts: dict, area=None, below=None) -> None:
         self.k, self.anim, self.fonts = k, anim, fonts
+        self.area = area if area is not None else master
+        self.below = below
         self.h = int(44 * k)
         self.pad = int(18 * k)
         self.gap = int(22 * k)
@@ -81,8 +86,15 @@ class Toast(tk.Canvas):
             self._render()
 
     # ---------- dibujo ----------
+    def restack(self) -> None:
+        """Por encima de todo lo de la ventana salvo `below` (lo llama quien se le pone encima)."""
+        if self.below is not None:
+            self.tk.call("lower", self._w, self.below._w)
+        else:
+            self.tk.call("raise", self._w)  # Canvas.lift() eleva elementos, no el widget
+
     def _max_width(self) -> int:
-        parent = self.master.winfo_width()
+        parent = self.area.winfo_width()
         return max(int(240 * self.k), min(int(620 * self.k), parent - 2 * self.margin))
 
     def _layout(self) -> None:
@@ -131,8 +143,8 @@ class Toast(tk.Canvas):
     def _slide(self, to: float) -> None:
         if to > 0 and not self.visible:
             self.visible = True
-            self.place(relx=0.5, rely=1.0, anchor="n", y=0)
-            self.tk.call("raise", self._w)  # Canvas.lift() eleva elementos, no el widget
+            self.place(in_=self.area, relx=0.5, rely=1.0, anchor="n", y=0)
+            self.restack()
         start = self.shown
 
         def step(p: float) -> None:

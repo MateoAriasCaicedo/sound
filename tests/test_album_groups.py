@@ -46,3 +46,16 @@ def test_every_row_belongs_to_exactly_one_card():
     _cards, members = group_albums(rows)
     flat = sorted(row for group in members for row in group)
     assert flat == list(range(len(rows)))
+
+
+def test_artist_key_uses_the_main_artist_without_accents():
+    from app.ui.cover_grid import artist_key
+    assert artist_key({"artist": "Rubén Blades, Willie Colón"}) == "ruben blades"
+    assert artist_key({"artist": "ABBA"}) == artist_key({"artist": "abba"})
+    assert artist_key({"artist": None}) == ""
+
+
+def test_decade_labels():
+    from app.ui.main import App
+    assert [App._decade_label(d) for d in (1960, 1980, 2000, 2020)] == [
+        "60s", "80s", "2000s", "2020s"]

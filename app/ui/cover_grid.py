@@ -13,16 +13,26 @@ Una tarjeta puede representar varias filas de la tabla: las canciones de un mism
 juntan en una sola tarjeta (ver `group_albums`). Por eso la cuadrícula traduce siempre entre
 sus tarjetas y las filas del `Treeview` (`members`).
 """
+import bisect
 import io
 import math
 import tkinter as tk
+import tkinter.font as tkfont
 from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from ..core.filters import fold
 from .theme import blend, readable_on, seed_color
-from .widgets import HEART, SS, _rounded_mask, bind_touchpad, elide, touchpad_deltas
+from .widgets import (
+    HEART,
+    SS,
+    PointerTip,
+    _rounded_mask,
+    bind_touchpad,
+    elide,
+    touchpad_deltas,
+)
 
 THUMB_CACHE = 120  # miniaturas en memoria
 SOURCE_CACHE = 48  # imágenes originales (recortadas a 512 px) para rehacer miniaturas
@@ -41,6 +51,11 @@ def album_key(t: dict) -> tuple[str, str] | None:
     if not album:
         return None
     return album, fold(t.get("artist") or "")
+
+
+def artist_key(t: dict) -> str:
+    """Artista principal de una canción, sin tildes ni mayúsculas ('A, B' cuenta como 'a')."""
+    return fold((t.get("artist") or "").split(",")[0])
 
 
 def group_albums(rows: list[dict], min_size: int = 2) -> tuple[list[dict], list[tuple[int, ...]]]:
@@ -99,17 +114,32 @@ def grid_metrics(width: int, k: float) -> tuple[int, int, int, int, int, int, in
 
 class CoverGrid(tk.Canvas):
     def __init__(self, master, anim, k: float, fonts: dict, on_select=None,
-                 on_activate=None, on_context=None, on_need_cover=None, on_like=None) -> None:
+                 on_activate=None, on_context=None, on_need_cover=None, on_like=None,
+                 on_artist=None, on_download=None, on_columns=None) -> None:
         super().__init__(master, highlightthickness=0, bd=0, takefocus=1)
         self.anim, self.k, self.fonts = anim, k, fonts
         self.on_select, self.on_activate = on_select, on_activate
         self.on_context, self.on_need_cover = on_context, on_need_cover
-        self.on_like = on_like
+        self.on_like, self.on_artist, self.on_download = on_like, on_artist, on_download
+        self.on_columns = on_columns  # cambió el número de columnas (al redimensionar)
+        self._cols_seen = 0
         self.items: list[dict] = []
         self.members: list[tuple[int, ...]] = []  # filas del Treeview de cada tarjeta
+        self.sections: list[tuple[int, str]] = []  # (primera tarjeta, título) de cada sección
+        self._blocks: list[tuple[int, int, int, int, str]] = []  # (desde, hasta, y título, y0, título)
         self._row_item: dict[int, int] = {}       # fila del Treeview → tarjeta
         self._card_vids: list[frozenset[str]] = []
-        self._hearts: dict[int, tuple[int, int, int, int]] = {}  # zona clicable del corazón
+        # zonas clicables dentro de cada tarjeta: corazón, descarga y nombre del artista
+        self._hearts: dict[int, tuple[int, int, int, int]] = {}
+        self._downloads: dict[int, tuple[int, int, int, int]] = {}
+        self._artists: dict[int, tuple[int, int, int, int]] = {}
+        self._full: dict[int, str] = {}  # texto completo de las tarjetas con algo recortado
+        self._artist_hot: int | None = None
+        link = tkfont.Font(font=fonts["small"])
+        link.configure(underline=1)
+        self._link_font = link
+        self.tip = PointerTip(self, anim, lambda: (blend(self.c["bg"], self.c["fg"], 0.14),
+                                                   self.c["fg"]))
         self.sel: set[int] = set()
         self.anchor: int | None = None
         self.hovered: int | None = None
@@ -142,7 +172,7 @@ class CoverGrid(tk.Canvas):
         self.bind("<Double-Button-1>", self._double)
         self.bind("<Button-3>", self._context)
         self.bind("<Motion>", self._motion)
-        self.bind("<Leave>", lambda _e: self._set_hover(None))
+        self.bind("<Leave>", self._leave)
         self.bind("<MouseWheel>", self._wheel)
         bind_touchpad(self, self._touchpad)
         self.bind("<Left>", lambda _e: self._move_by(-1))
@@ -166,9 +196,14 @@ class CoverGrid(tk.Canvas):
         if view_kind is not None:
             self._view_kind = view_kind
 
-    def set_items(self, items: list[dict], members: list[tuple[int, ...]] | None = None) -> None:
-        """`members[i]`: filas del Treeview que representa la tarjeta i (por defecto, la i)."""
+    def set_items(self, items: list[dict], members: list[tuple[int, ...]] | None = None,
+                  sections: list[tuple[int, str]] | None = None) -> None:
+        """`members[i]`: filas del Treeview que representa la tarjeta i (por defecto, la i).
+
+        `sections`: (primera tarjeta, título) de cada bloque con encabezado, en orden.
+        """
         self.items = list(items)
+        self.sections = list(sections or [])
         self.members = list(members) if members is not None else [(i,) for i in range(len(items))]
         self._row_item = {row: i for i, rows in enumerate(self.members) for row in rows}
         self._card_vids = [frozenset(x.get("video_id") for x in self.tracks_of(i)
@@ -264,6 +299,7 @@ class CoverGrid(tk.Canvas):
         self._rings.clear()
         self._chips.clear()
         if self.items:
+            self._draw_headers()
             self._render_visible(force=True)
 
     def set_accent(self, accent: str) -> None:
@@ -279,21 +315,43 @@ class CoverGrid(tk.Canvas):
     def _metrics(self) -> tuple[int, int, int, int, int, int, int, int]:
         return grid_metrics(self._width or self.winfo_width(), self.k)
 
+    @property
+    def columns(self) -> int:
+        """Columnas para el ancho actual (aunque aún no se haya dibujado nada)."""
+        return self._metrics()[0]
+
     def _layout(self) -> None:
         self.delete("all")
         self._cards.clear()
         self._eq.clear()
         self._range = None
         self._geo = self._metrics()
-        cols, cell, _cover, card_h, row_h, pad, _gap, _x0 = self._geo
+        cols, cell, _cover, card_h, row_h, pad, gap, _x0 = self._geo
+        if cols != self._cols_seen and self._width:
+            self._cols_seen = cols
+            if self.on_columns is not None:
+                self.after_idle(self.on_columns, cols)
+        self._blocks = []
         if not self.items:
             self.total = 1
             self.configure(scrollregion=(0, 0, max(1, self._width), 1))
             self.off = self._goal = 0.0
             return
-        rows = math.ceil(len(self.items) / cols)
-        self.total = pad * 2 + rows * card_h + (rows - 1) * (row_h - card_h)
+        # bloques: cada sección lleva su título encima y empieza en una fila nueva
+        sections = self.sections or [(0, "")]
+        header_h, y = int(38 * self.k), pad
+        for n, (start, title) in enumerate(sections):
+            end = sections[n + 1][0] if n + 1 < len(sections) else len(self.items)
+            if end <= start:
+                continue
+            title_y = y
+            if title:
+                y += header_h
+            self._blocks.append((start, end, title_y, y, title))
+            y += math.ceil((end - start) / cols) * row_h + (int(10 * self.k) if title else 0)
+        self.total = y - gap + pad
         self.configure(scrollregion=(0, 0, max(1, self._width), self.total))
+        self._draw_headers()
         limit = max(0, self.total - self.winfo_height())
         self.off = min(max(0.0, self.off), float(limit))
         self._goal = self.off
@@ -307,12 +365,37 @@ class CoverGrid(tk.Canvas):
         elif self.items:
             self._render_visible(force=True)
 
+    def _block_of(self, i: int) -> tuple[int, int, int, int, str]:
+        starts = [b[0] for b in self._blocks]
+        return self._blocks[max(0, bisect.bisect_right(starts, i) - 1)]
+
     def _cell(self, i: int) -> tuple[int, int]:
         cols, cell, _cover, card_h, row_h, pad, gap, x0 = self._geo
-        return x0 + (i % cols) * (cell + gap), pad + (i // cols) * row_h
+        if not self._blocks:
+            return x0, pad
+        start, _end, _ty, y0, _t = self._block_of(i)
+        local = i - start
+        return x0 + (local % cols) * (cell + gap), y0 + (local // cols) * row_h
 
     def _in_range(self, i: int) -> bool:
         return self._range is not None and self._range[0] <= i < self._range[1]
+
+    def _draw_headers(self) -> None:
+        """Título de cada sección («En tu biblioteca», «En YouTube») con una línea fina."""
+        self.delete("header")
+        c, k = self.c, self.k
+        _cols, _cell, _cover, _card_h, _row_h, _pad, _gap, x0 = self._geo
+        right = max(x0 + 1, self._width - x0)
+        for _start, _end, title_y, _y0, title in self._blocks:
+            if not title:
+                continue
+            mid = title_y + int(16 * k)
+            text = self.create_text(x0 + int(5 * k), mid, anchor="w", text=title.upper(),
+                                    font=self.fonts["small"], fill=c["faint"], tags="header")
+            x1 = (self.bbox(text) or (0, 0, x0, 0))[2] + int(12 * k)
+            if x1 < right:
+                self.create_line(x1, mid, right - int(5 * k), mid, fill=blend(c["bg"], c["fg"], 0.12),
+                                 tags="header")
 
     # ---------- dibujo ----------
     def _render_visible(self, force: bool = False) -> None:
@@ -322,13 +405,19 @@ class CoverGrid(tk.Canvas):
             self._eq.clear()
             self._range = None
             return
-        cols, _cell, _cover, _card_h, row_h, pad, _gap, _x0 = self._geo
+        cols, _cell, _cover, _card_h, row_h, _pad, _gap, _x0 = self._geo
         top, height = self.off, max(1, self.winfo_height())
-        rows = math.ceil(len(self.items) / cols)
-        first_row = max(0, int((top - pad) // row_h))
-        last_row = min(rows - 1, int((top + height - pad) // row_h) + 1)
-        first = first_row * cols
-        last = min(len(self.items), (last_row + 1) * cols)
+        first, last = len(self.items), 0
+        for start, end, _ty, y0, _t in self._blocks:
+            rows = math.ceil((end - start) / cols)
+            first_row = max(0, int((top - y0) // row_h))
+            last_row = min(rows - 1, int((top + height - y0) // row_h) + 1)
+            if last_row < first_row or y0 > top + height + row_h:
+                continue
+            first = min(first, start + first_row * cols)
+            last = max(last, min(end, start + (last_row + 1) * cols))
+        if first >= last:
+            first, last = 0, 0
         if (first, last) == self._range and not force:
             return
         self._range = (first, last)
@@ -340,7 +429,8 @@ class CoverGrid(tk.Canvas):
                 self._paint_one(i)
 
     def _forget(self, i: int) -> None:
-        self._hearts.pop(i, None)
+        for zone in (self._hearts, self._downloads, self._artists, self._full):
+            zone.pop(i, None)
         removed = set(self._cards.pop(i, ()))
         for item in removed:
             self.delete(item)
@@ -398,20 +488,38 @@ class CoverGrid(tk.Canvas):
             items.extend(self._badge("♥", cx + cover - int(5 * k), cy + int(5 * k),
                                      anchor="ne", color=HEART)[0])
         state = self._state_of(t) or (f"{len(vids)} canciones" if album else "")
-        if state:
-            items.extend(self._badge(state, cx + cover - int(5 * k),
-                                     cy + cover - int(5 * k), anchor="se")[0])
+        corner = (cx + cover - int(5 * k), cy + cover - int(5 * k))
+        if self._is_remote(t) and state in ("", "✗") and self.on_download is not None:
+            # resultado de YouTube: botón de descarga a la vista (con texto al pasar el ratón)
+            label = ("↓ Descargar" if hovered else "↓") if not state else "↓ Reintentar"
+            badge, rect = self._badge(label, *corner, anchor="se", wide=True)
+            items.extend(badge)
+            self._downloads[i] = rect
+        elif state:
+            items.extend(self._badge(state, *corner, anchor="se")[0])
 
         title_y = cy + cover + int(5 * k)
         tw = cover
         title_color = c["accent"] if playing else (
             c["fg"] if not self._is_remote(t) or selected or hovered else c["dim"])
-        items.append(self.create_text(cx, title_y, anchor="nw", text=elide(
-            self.fonts["body"], t.get("title") or "", tw), font=self.fonts["body"],
-            fill=title_color))
-        items.append(self.create_text(cx, title_y + int(19 * k), anchor="nw", text=elide(
-            self.fonts["small"], t.get("artist") or "", tw), font=self.fonts["small"],
-            fill=c["faint"] if self._is_remote(t) and not selected and not hovered else c["dim"]))
+        title, artist = t.get("title") or "", t.get("artist") or ""
+        shown_title = elide(self.fonts["body"], title, tw)
+        items.append(self.create_text(cx, title_y, anchor="nw", text=shown_title,
+                                      font=self.fonts["body"], fill=title_color))
+        link = not self._is_remote(t) and self.on_artist is not None and bool(artist)
+        hot = link and i == self._artist_hot
+        shown_artist = elide(self.fonts["small"], artist, tw)
+        artist_color = c["faint"] if self._is_remote(t) and not selected and not hovered else (
+            c["fg"] if hot else c["dim"])
+        artist_y = title_y + int(19 * k)
+        items.append(self.create_text(cx, artist_y, anchor="nw", text=shown_artist,
+                                      font=self._link_font if hot else self.fonts["small"],
+                                      fill=artist_color))
+        if link:  # el artista es un enlace a su página
+            width = self.fonts["small"].measure(shown_artist)
+            self._artists[i] = (cx, artist_y, cx + width, artist_y + int(17 * k))
+        if shown_title != title or shown_artist != artist:
+            self._full[i] = f"{title}\n{artist}" if artist else title
         self._cards[i] = items
 
     def _cover_track(self, i: int) -> dict:
@@ -545,7 +653,8 @@ class CoverGrid(tk.Canvas):
             return "✗"
         if self._view_kind in ("recent", "top") and t.get("_plays"):
             return f"×{t['_plays']}"
-        return self._states.get(vid) or ("" if not self._is_remote(t) else "☁")
+        state = self._states.get(vid) or ""
+        return "" if state == "☁" else state
 
     # ---------- interacción ----------
     def selection(self) -> tuple[str, ...]:
@@ -593,21 +702,33 @@ class CoverGrid(tk.Canvas):
         if not self.items or self._geo[0] <= 0:
             return None
         cols, cell, _cover, card_h, row_h, pad, gap, x0 = self._geo
-        if x < x0 or y < pad:
+        if x < x0:
             return None
+        block = next((b for b in self._blocks
+                      if b[3] <= y < b[3] + math.ceil((b[1] - b[0]) / cols) * row_h), None)
+        if block is None:
+            return None
+        start, end, _ty, y0, _t = block
         col = int((x - x0) // (cell + gap))
-        row = int((y - pad) // row_h)
+        row = int((y - y0) // row_h)
         if not 0 <= col < cols or row < 0:
             return None
-        if x - x0 - col * (cell + gap) > cell or y - pad - row * row_h > card_h:
+        if x - x0 - col * (cell + gap) > cell or y - y0 - row * row_h > card_h:
             return None
-        i = row * cols + col
-        return i if 0 <= i < len(self.items) else None
+        i = start + row * cols + col
+        return i if start <= i < end else None
 
     def _motion(self, e) -> None:
-        i = self._hit(self.canvasx(e.x), self.canvasy(e.y))
+        x, y = self.canvasx(e.x), self.canvasy(e.y)
+        i = self._hit(x, y)
         self.configure(cursor="hand2" if i is not None else "arrow")
         self._set_hover(i)
+        hot = i if i is not None and self._inside(self._artists.get(i), x, y) else None
+        if hot != self._artist_hot:  # el nombre del artista se subraya: es un enlace
+            old, self._artist_hot = self._artist_hot, hot
+            for j in {old, hot} - {None}:
+                if self._in_range(j):
+                    self._paint_one(j)
 
     def _set_hover(self, i: int | None) -> None:
         if i == self.hovered:
@@ -616,19 +737,35 @@ class CoverGrid(tk.Canvas):
         for j in (old, i):
             if j is not None and self._in_range(j):
                 self._paint_one(j)
+        self.tip.set(self._full.get(i) if i is not None else None)
+
+    def _leave(self, _e=None) -> None:
+        self._artist_hot = None
+        self._set_hover(None)
+
+    @staticmethod
+    def _inside(rect, x: float, y: float) -> bool:
+        return rect is not None and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
 
     def _on_heart(self, i: int, x: float, y: float) -> bool:
-        rect = self._hearts.get(i)
-        return rect is not None and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
+        return self._inside(self._hearts.get(i), x, y)
 
     def _press(self, e) -> None:
         self.focus_set()
+        self.tip.hide()
         x, y = self.canvasx(e.x), self.canvasy(e.y)
         i = self._hit(x, y)
         if i is None:
             return
+        # las zonas clicables de la tarjeta actúan sin cambiar la selección
         if self.on_like is not None and self._on_heart(i, x, y):
-            self.on_like(i)  # marcar no cambia la selección
+            self.on_like(i)
+            return
+        if self.on_download is not None and self._inside(self._downloads.get(i), x, y):
+            self.on_download(i)
+            return
+        if self.on_artist is not None and self._inside(self._artists.get(i), x, y):
+            self.on_artist(i)
             return
         ctrl = bool(e.state & 0x4)
         shift = bool(e.state & 0x1)
@@ -653,8 +790,9 @@ class CoverGrid(tk.Canvas):
     def _double(self, e) -> None:
         x, y = self.canvasx(e.x), self.canvasy(e.y)
         i = self._hit(x, y)
-        if i is not None and self._on_heart(i, x, y):
-            return  # doble clic en el corazón: marcar y desmarcar, no reproducir
+        if i is not None and any(self._inside(zone.get(i), x, y)
+                                 for zone in (self._hearts, self._downloads, self._artists)):
+            return  # doble clic en un botón de la tarjeta: no reproduce
         if i is not None and self.on_activate is not None:
             self.on_activate(i)
 

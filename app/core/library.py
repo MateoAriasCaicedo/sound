@@ -60,10 +60,11 @@ CREATE INDEX IF NOT EXISTS tracks_by_genre ON tracks (genre COLLATE NOCASE);
 """
 
 QUEUE_FIELDS = ("video_id", "title", "artist", "album", "duration", "cover", "genre")
-SCHEMA_VERSION = 2  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
+SCHEMA_VERSION = 3  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
 # Columnas añadidas después de la primera versión: se agregan a bases de datos ya existentes.
 _ADDED_COLUMNS = {
-    "tracks": {"year": "INTEGER", "has_cover": "INTEGER"},
+    # track_no: posición en su álbum; se pide a YouTube Music la primera vez que se abre el álbum
+    "tracks": {"year": "INTEGER", "has_cover": "INTEGER", "track_no": "INTEGER"},
     "queue": {"priority": "INTEGER NOT NULL DEFAULT 0"},  # más alto se descarga antes
 }
 
@@ -147,8 +148,8 @@ def all_tracks(db_path: Path | None = None) -> list[dict]:
     """Toda la biblioteca descargada, ordenada por artista y título."""
     with closing(connect(db_path)) as conn:
         rows = conn.execute(
-            "SELECT video_id, title, artist, album, genre, duration, path FROM tracks"
-            " ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE"
+            "SELECT video_id, title, artist, album, genre, duration, path, year, track_no,"
+            " added_at FROM tracks ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -158,9 +159,18 @@ def get_track(video_id: str, db_path: Path | None = None) -> dict | None:
     with closing(connect(db_path)) as conn:
         row = conn.execute(
             "SELECT video_id, title, artist, album, genre, duration, path, year, has_cover,"
-            " added_at FROM tracks WHERE video_id = ?", (video_id,)
+            " track_no, added_at FROM tracks WHERE video_id = ?", (video_id,)
         ).fetchone()
     return dict(row) if row else None
+
+
+def set_track_numbers(numbers: dict[str, int], db_path: Path | None = None) -> None:
+    """Guarda la posición de cada canción dentro de su álbum ({video_id: número})."""
+    if not numbers:
+        return
+    with closing(connect(db_path)) as conn, conn:
+        conn.executemany("UPDATE tracks SET track_no = ? WHERE video_id = ?",
+                         [(int(n), vid) for vid, n in numbers.items()])
 
 
 def genre_label(genre: str, db_path: Path | None = None) -> str:

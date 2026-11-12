@@ -18,3 +18,5 @@ class LibraryMixin:
         self._build_sidebar()
         self.refresh_view()
         self._refresh_now_heart()
+        if getattr(self, "now_open", False):  # una descarga pudo completar su álbum
+            self._now_album()

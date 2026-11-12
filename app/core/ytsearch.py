@@ -14,6 +14,8 @@ from ytmusicapi.navigation import (
 )
 from ytmusicapi.parsers.browsing import parse_playlist
 
+from .filters import base_title, fold
+
 _yt: YTMusic | None = None
 _yt_lock = threading.Lock()
 
@@ -239,6 +241,47 @@ def album_tracks(playlist_id: str, limit: int = 200) -> list[dict]:
     if not browse_id:
         return []
     return album_details(browse_id, limit)[1]
+
+
+def album_track_numbers(album: str, artist: str) -> list[dict]:
+    """Pistas del álbum de YouTube Music que coincide con (álbum, artista), con su número.
+
+    Devuelve [{"video_id", "title", "track_no"}] o [] si no se encuentra el álbum.
+    """
+    want_album, want_artist = fold(album), fold(artist.split(",")[0])
+    best = None
+    for result in _client().search(f"{album} {artist}", filter="albums", limit=5):
+        if fold(result.get("title") or "") != want_album or not result.get("browseId"):
+            continue
+        names = fold(", ".join(a.get("name") or "" for a in result.get("artists") or []))
+        if want_artist and want_artist in names:
+            best = result
+            break
+        best = best or result
+    if best is None:
+        return []
+    data = _client().get_album(best["browseId"])
+    return [{"video_id": item.get("videoId"), "title": item.get("title") or "",
+             "track_no": item["trackNumber"]}
+            for item in data.get("tracks", []) if item.get("trackNumber")]
+
+
+def match_track_numbers(tracks: list[dict], album: list[dict]) -> dict[str, int]:
+    """Número de pista de cada canción de `tracks`, emparejada con las pistas del álbum.
+
+    Primero por id de video y, si no coincide (un videoclip frente a la pista de audio), por
+    título base: 'Song - 2011 Remaster' y 'Song' son la misma pista.
+    """
+    by_id = {a["video_id"]: a["track_no"] for a in album if a.get("video_id")}
+    by_title: dict[str, int] = {}
+    for a in album:
+        by_title.setdefault(base_title(a.get("title") or ""), a["track_no"])
+    found = {}
+    for t in tracks:
+        number = by_id.get(t["video_id"]) or by_title.get(base_title(t.get("title") or ""))
+        if number:
+            found[t["video_id"]] = int(number)
+    return found
 
 
 def artist_details(channel_id: str, limit: int = 200) -> tuple[str, list[dict]]:

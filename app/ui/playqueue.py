@@ -18,6 +18,7 @@ class PlayQueue:
         self.shuffle = False
         self.repeat = 0               # 0 = no, 1 = todo, 2 = una
         self.auto_ctx = False         # la lista es una cola automática (semilla + similares/respaldo)
+        self.album = False            # la lista es un álbum: al acabar puede seguir la automática
         self.played: set[str] = set()
 
     def start(self, ctx: list[dict], first: int, auto: bool) -> None:

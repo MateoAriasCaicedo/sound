@@ -1,5 +1,55 @@
 # Cambios
 
+## Sin publicar
+
+### Reproduciendo, en grande
+- **Vista «Reproduciendo»**: la canción que suena en grande, sobre su portada desenfocada, con
+  título, artista y álbum (ambos llevan a su página) y tres pestañas: las canciones de su
+  **álbum** que tienes, en orden de pista; la **letra** sincronizada, que sigue la canción (un clic
+  en una línea salta a ese momento), y lo que sigue en la **cola**.
+- Se abre con un clic en la portada del reproductor, con su botón junto al mini reproductor o con
+  `Ctrl+Shift+F`. `F11` la pone a **pantalla completa** y `Esc` vuelve paso a paso.
+- Si las letras están desactivadas, la pestaña explica qué datos se enviarían a LRCLIB antes de
+  ofrecer activarlas.
+
+### Inicio
+- Nueva pantalla de entrada con estanterías: **Seguir escuchando**, **Lo que más escuchas**,
+  **Añadidas hace poco**, **Tus Me gusta** y **Todavía sin escuchar** (un sorteo que cambia cada
+  día). Cada canción sale una sola vez y la cola de lo que pongas es su estantería. Un clic en
+  «Sound» vuelve a Inicio.
+
+### Biblioteca
+- **Me gusta a la vista**: corazón junto al título de lo que suena y al pasar el ratón por cada
+  portada. `Ctrl+L` marca la canción que suena si no hay nada seleccionado.
+- En la cuadrícula, las canciones de un mismo **álbum** se juntan en una tarjeta. Al abrirlo se
+  ve como lista **en orden de pista** (el orden se pide a YouTube Music la primera vez).
+- **Página de artista**: clic en el artista bajo una portada, en el reproductor o desde el menú
+  contextual («Ir a…», «Ir al álbum…»). `Esc` vuelve atrás nivel a nivel.
+- **Filtro por década** encima de la lista y **selector de orden** visible (recién añadidas,
+  título, artista, álbum, año, más escuchadas, duración).
+- Los géneros con una sola canción se pliegan en el lateral («N géneros más…»).
+- Si hay **canciones repetidas**, un aviso ofrece revisarlas (solo vuelve a avisar si cambian).
+
+### Búsqueda
+- Los resultados se separan en **«En tu biblioteca»** y **«En YouTube»**, y cada resultado de
+  YouTube tiene su botón **↓ Descargar**.
+
+### Interfaz
+- **Avisos con «Deshacer»** (también `Ctrl+Z`) para Me gusta, la cola y eliminar canciones.
+  Eliminar ya no pide confirmación: el archivo se borra cuando el aviso desaparece.
+- **Mini reproductor** siempre encima (`Ctrl+Shift+M` o el botón junto a «A continuación»).
+- Botones **anterior / reproducir / siguiente** en la miniatura de la barra de tareas.
+- Cabecera más compacta: el título y el estado comparten línea.
+- Los nombres recortados muestran el **texto completo** al pasar el ratón.
+- La onda tiene un **cabezal** (línea y punto) que crece al pasar el ratón: ya no se confunde dónde
+  va la canción.
+- Aleatorio, repetición, cola automática y crossfade llevan un **punto** cuando están activos, y
+  su ayuda dice si lo están.
+- Con la ventana estrecha, el volumen se acorta para que el tiempo de la canción no se corte.
+
+### Reproducción
+- Al terminar un álbum, la **cola automática** sigue con canciones similares (si está activa).
+
 ## 1.1.0 — 2026-11-06
 
 ### Búsqueda

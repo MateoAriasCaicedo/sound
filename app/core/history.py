@@ -64,6 +64,13 @@ def most_played(limit: int = 20, days: int | None = None, db_path: Path | None =
     return [dict(r) for r in rows]
 
 
+def play_counts(db_path: Path | None = None) -> dict[str, int]:
+    """Cuántas veces ha sonado cada canción ({video_id: reproducciones})."""
+    with closing(library.connect(db_path)) as conn:
+        rows = conn.execute("SELECT video_id, COUNT(*) FROM plays GROUP BY video_id").fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
 def prune(days: int = 730, db_path: Path | None = None) -> int:
     """Borra reproducciones más antiguas que `days` días. Devuelve cuántas quitó.
 

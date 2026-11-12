@@ -52,7 +52,7 @@ def ui_fonts(root: tk.Misc) -> dict[str, tkfont.Font]:
     text = pick("Segoe UI Variable Text", "Segoe UI")
     strong = pick("Segoe UI Variable Text Semibold", "Segoe UI Semibold")
     return dict(
-        display=tkfont.Font(root, family=pick("Bahnschrift Light", "Segoe UI Light"), size=24),
+        display=tkfont.Font(root, family=pick("Bahnschrift Light", "Segoe UI Light"), size=22),
         mark=tkfont.Font(root, family=pick("Bahnschrift SemiBold", "Segoe UI Semibold"), size=13),
         body=tkfont.Font(root, family=text, size=10),
         strong=tkfont.Font(root, family=strong, size=11),
@@ -191,6 +191,60 @@ class Tooltip:
             self.win = None
 
 
+class PointerTip:
+    """Texto completo de algo que se ve recortado, junto al puntero y tras una pausa.
+
+    A diferencia de `Tooltip`, no pertenece a un control entero: quien lo usa llama a
+    `set(texto)` al pasar sobre cada elemento (una tarjeta, una celda) y `set(None)` al salir.
+    """
+
+    def __init__(self, widget: tk.Misc, anim: Animator, colors, delay: int = 550) -> None:
+        self.widget, self.anim, self.colors, self.delay = widget, anim, colors, delay
+        self.text: str | None = None
+        self.win = None
+        self.job = None
+
+    def set(self, text: str | None) -> None:
+        if text == self.text:
+            return
+        self.text = text
+        self._close()
+        if text:
+            self.job = self.widget.after(self.delay, self._show)
+
+    def hide(self) -> None:
+        self.text = None
+        self._close()
+
+    def _close(self) -> None:
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.win is not None:
+            self.win.destroy()
+            self.win = None
+
+    def _show(self) -> None:
+        self.job = None
+        if not self.text or not self.widget.winfo_ismapped():
+            return
+        bg, fg = self.colors()
+        win = self.win = tk.Toplevel(self.widget)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True, "-alpha", 0.0)
+        tk.Label(win, text=self.text, bg=bg, fg=fg, padx=10, pady=5, justify="left",
+                 font=("Segoe UI", 9), wraplength=420).pack()
+        win.update_idletasks()
+        x = self.widget.winfo_pointerx() + 14
+        y = self.widget.winfo_pointery() + 20
+        x = min(x, self.widget.winfo_screenwidth() - win.winfo_reqwidth() - 8)
+        if y + win.winfo_reqheight() > self.widget.winfo_screenheight() - 8:
+            y = self.widget.winfo_pointery() - win.winfo_reqheight() - 12
+        win.geometry(f"+{x}+{y}")
+        self.anim.tween(("ptip", id(self)), 120, lambda p: win.winfo_exists()
+                        and win.attributes("-alpha", p))
+
+
 class IconButton(tk.Canvas):
     """Icono sin caja: aparece un disco suave al pasar el ratón y encoge un poco al pulsar."""
 
@@ -295,7 +349,7 @@ class IconButton(tk.Canvas):
         mask = self._mask if size == self.g else self._mask.resize((size, size), Image.LANCZOS)
         off = (d - size) // 2
         img.alpha_composite(_layer(mask, color), (off, off))
-        if self.active:
+        if self.active or self.on:  # el punto distingue «activado» aunque el color se parezca
             r = max(1.5, d * 0.045)
             mid = d / 2
             ImageDraw.Draw(img).ellipse((mid - r, d - 2 * r - 1, mid + r, d - 1),
@@ -601,17 +655,89 @@ class PillButton(tk.Canvas):
 
 
 
+class ChipBar(tk.Canvas):
+    """Opciones excluyentes en forma de pastilla (las décadas de la vista, por ejemplo).
+
+    `on_pick(clave)` recibe la clave elegida; volver a pulsar la marcada la desmarca (None).
+    """
+
+    def __init__(self, master, anim: Animator, k: float, font, on_pick) -> None:
+        self.h = int(28 * k)
+        super().__init__(master, height=self.h, width=1, highlightthickness=0, bd=0)
+        self.anim, self.k, self.font, self.on_pick = anim, k, font, on_pick
+        self.options: list[tuple] = []
+        self.selected = None
+        self.hover: int | None = None
+        self.c = dict(bg="#000000", fg="#ffffff", dim="#888888")
+        self._spans: list[tuple[int, int]] = []
+        self._photos: list = []
+        self.bind("<Motion>", self._motion)
+        self.bind("<Leave>", lambda e: self._set_hover(None))
+        self.bind("<ButtonRelease-1>", self._click)
+
+    def set_options(self, options: list[tuple], selected=None) -> None:
+        if options == self.options and selected == self.selected:
+            return
+        self.options, self.selected = list(options), selected
+        self.hover = None
+        self._render()
+
+    def restyle(self, bg: str, fg: str, dim: str) -> None:
+        self.c.update(bg=bg, fg=fg, dim=dim)
+        self.configure(bg=bg)
+        self._render()
+
+    def _render(self) -> None:
+        self.delete("all")
+        self._spans, self._photos = [], []
+        c, h = self.c, self.h
+        pad, gap, x = int(11 * self.k), int(4 * self.k), 0
+        for i, (key, label) in enumerate(self.options):
+            w = self.font.measure(label) + 2 * pad
+            chosen = key == self.selected
+            fill = blend(c["bg"], c["fg"], 0.15 if chosen else 0.07 if i == self.hover else 0.0)
+            if fill != c["bg"]:
+                photo = ImageTk.PhotoImage(_layer(_rounded_mask(w, h, h // 2), fill), master=self)
+                self._photos.append(photo)
+                self.create_image(x, 0, anchor="nw", image=photo)
+            self.create_text(x + w // 2, h // 2, text=label, font=self.font,
+                             fill=c["fg"] if chosen or i == self.hover else c["dim"])
+            self._spans.append((x, x + w))
+            x += w + gap
+        self.configure(width=max(1, x - gap), cursor="hand2" if self.options else "")
+
+    def _at(self, x: int) -> int | None:
+        return next((i for i, (a, b) in enumerate(self._spans) if a <= x <= b), None)
+
+    def _set_hover(self, i: int | None) -> None:
+        if i != self.hover:
+            self.hover = i
+            self._render()
+
+    def _motion(self, e) -> None:
+        self._set_hover(self._at(e.x))
+
+    def _click(self, e) -> None:
+        i = self._at(e.x)
+        if i is None:
+            return
+        key = self.options[i][0]
+        self.on_pick(None if key == self.selected else key)
+
+
 class SwapText:
     """Un texto en un Canvas: al cambiar, el viejo sube y se apaga mientras el nuevo entra."""
 
-    def __init__(self, canvas: tk.Canvas, anim: Animator, font, x: int, y: int, rise: int) -> None:
+    def __init__(self, canvas: tk.Canvas, anim: Animator, font, x: int, y: int, rise: int,
+                 tags: tuple = ()) -> None:
         self.c, self.anim, self.font = canvas, anim, font
         self.x, self.y, self.rise = x, y, rise
+        self.tags = tags  # para enlazar eventos al texto aunque se sustituya al cambiar
         self.fg, self.bg = "#ffffff", "#000000"
         self.text = ""
         self.max_w = 0
         self._old = None
-        self.item = canvas.create_text(x, y, text="", font=font, anchor="w")
+        self.item = canvas.create_text(x, y, text="", font=font, anchor="w", tags=tags)
 
     def _fit(self, text: str) -> str:
         return elide(self.font, text, self.max_w) if self.max_w else text
@@ -631,7 +757,7 @@ class SwapText:
             return
         old = self._old = self.item
         new = self.item = c.create_text(x, y + rise, text=self._fit(text), font=self.font,
-                                        anchor="w", fill=self.bg)
+                                        anchor="w", fill=self.bg, tags=self.tags)
 
         def step(p: float) -> None:
             c.coords(new, x, y + rise * (1 - p))
@@ -659,13 +785,23 @@ HEART = "#ff7a9a"  # «Me gusta» marcado: el mismo rosado que en las portadas
 class NowPlaying(tk.Canvas):
     """Título y artista de la canción que suena, con su corazón de «Me gusta» al lado."""
 
-    def __init__(self, master, anim: Animator, k: float, fonts: dict, on_like=None) -> None:
+    def __init__(self, master, anim: Animator, k: float, fonts: dict, on_like=None,
+                 on_artist=None) -> None:
         h = int(44 * k)
         super().__init__(master, height=h, width=int(120 * k), highlightthickness=0, bd=0)
-        self.anim, self.k, self.on_like = anim, k, on_like
+        self.anim, self.k, self.on_like, self.on_artist = anim, k, on_like, on_artist
         self.title = SwapText(self, anim, fonts["strong"], 0, int(h * 0.30), int(8 * k))
-        self.artist = SwapText(self, anim, fonts["small"], 0, int(h * 0.74), int(6 * k))
+        self.artist = SwapText(self, anim, fonts["small"], 0, int(h * 0.74), int(6 * k),
+                               tags=("artist",))
         self.c = dict(bg="#000000", fg="#ffffff", dim="#888888")
+        self.artist_link = False  # el artista abre su página si tienes canciones suyas
+        self.tip = PointerTip(self, anim, lambda: (blend(self.c["bg"], self.c["fg"], 0.14),
+                                                   self.c["fg"]))
+        self.tag_bind("artist", "<Enter>", lambda e: self._artist_hover(True))
+        self.tag_bind("artist", "<Leave>", lambda e: self._artist_hover(False))
+        self.tag_bind("artist", "<ButtonRelease-1>", self._artist_click)
+        self.bind("<Enter>", self._show_full, add="+")
+        self.bind("<Leave>", lambda e: self.tip.set(None), add="+")
         self.liked: bool | None = None  # None: sin corazón (la canción no está en la biblioteca)
         self.hot = self.pop = 0.0
         self.heart_size = int(18 * k)
@@ -755,26 +891,58 @@ class NowPlaying(tk.Canvas):
         if self.on_like is not None and self.liked is not None:
             self.on_like()
 
+    # ---------- artista y texto completo ----------
+    def set_artist_link(self, on: bool) -> None:
+        self.artist_link = on
+
+    def _artist_hover(self, on: bool) -> None:
+        on = on and self.artist_link
+        self.configure(cursor="hand2" if on else "")
+        self.artist.recolor(self.c["fg"] if on else self.c["dim"], self.c["bg"])
+
+    def _artist_click(self, _e=None) -> None:
+        if self.artist_link and self.on_artist is not None:
+            self.tip.hide()
+            self.on_artist()
+
+    def _show_full(self, _e=None) -> None:
+        cut = any(line._fit(line.text) != line.text for line in (self.title, self.artist))
+        self.tip.set(self.title.text + "\n" + self.artist.text if cut else None)
+
 
 class Header(tk.Canvas):
     """Cabecera: título grande y línea de estado sobre un degradado teñido por la portada."""
 
     def __init__(self, master, anim: Animator, k: float, fonts: dict, x: int) -> None:
-        self.h = int(92 * k)
+        # compacta: el estado va en la misma línea que el título, sobre su línea base
+        self.h = int(58 * k)
         super().__init__(master, height=self.h, highlightthickness=0, bd=0)
-        self.anim, self.pad = anim, x
+        self.anim, self.pad, self.gap = anim, x, int(16 * k)
         self.colors = ("#000000", "#000000")
         self._painted = _Painted(self)
-        self.title = SwapText(self, anim, fonts["display"], x, int(30 * k), int(10 * k))
-        self.sub = SwapText(self, anim, fonts["small"], x, int(66 * k), 0)
+        display, small = fonts["display"], fonts["small"]
+        y = int(26 * k)
+        # centro vertical del texto pequeño para que comparta línea base con el título
+        baseline = y + (display.metrics("ascent") - display.metrics("descent")) / 2
+        sub_y = round(baseline - (small.metrics("ascent") - small.metrics("descent")) / 2)
+        self.title = SwapText(self, anim, display, x, y, int(10 * k))
+        self.sub = SwapText(self, anim, small, x, sub_y, 0)
         self._dim = self._fg = "#888888"
         self.bind("<Configure>", self._resized)
 
     def _resized(self, e) -> None:
-        self.title.max_w = self.sub.max_w = max(1, e.width - self.pad - 16)
+        self.title.max_w = max(1, int((e.width - self.pad) * 0.6))
         self.title.refit()
-        self.sub.refit()
+        self._place_sub()
         self._paint()
+
+    def _place_sub(self) -> None:
+        """El estado empieza donde acaba el título y ocupa el resto de la línea."""
+        x = self.pad + self.title.font.measure(self.title._fit(self.title.text)) + self.gap
+        self.sub.x = x
+        self.coords(self.sub.item, x, self.sub.y)
+        self.sub.max_w = max(1, self.winfo_width() - x - 16)
+        self.sub.refit()
 
     def _paint(self) -> None:
         w = max(1, self.winfo_width())
@@ -800,6 +968,7 @@ class Header(tk.Canvas):
 
     def set_title(self, text: str, animate: bool = True) -> None:
         self.title.set(text, animate)
+        self._place_sub()
 
     def set_status(self, text: str) -> None:
         if text == self.sub.text:
@@ -1202,6 +1371,14 @@ class Slider(tk.Canvas):
         self.configure(bg=bg)
         self._render()
 
+    def set_length(self, length: int) -> None:
+        """Otro largo de carril (con la ventana estrecha se acorta)."""
+        w = int(length * self.k)
+        if w != self.w:
+            self.w = w
+            self.configure(width=w)
+            self._render()
+
     def _render(self) -> None:
         c = self.c
         w, h = self.w * SS, self.h * SS
@@ -1359,6 +1536,11 @@ class WaveSeek(tk.Canvas):
         self._full = True    # el próximo dibujo recorre todas las barras
         self._window = (0, 0)  # barras movidas en el dibujo anterior
         self.c = dict(bg="#000000", rest="#333333", ahead="#555555", accent="#ffffff", fg="#ffffff")
+        # cabezal: una línea fina con un punto arriba; deja claro dónde va la canción
+        self._head = self.create_line(0, 0, 0, 0, width=max(2, round(1.5 * k)), state="hidden",
+                                      capstyle="round")
+        self._knob = self.create_oval(0, 0, 0, 0, width=0, state="hidden")
+        self.knob = 0.0  # 0: punto pequeño; 1: grande (ratón encima o arrastrando)
         self._label = self.create_text(0, int(7 * k), text="", font=font, state="hidden")
         self.bind("<Configure>", self._rebuild)
         self.bind("<ButtonPress-1>", self._press)
@@ -1382,6 +1564,8 @@ class WaveSeek(tk.Canvas):
         if seed != self.seed:
             self.seed = seed
             self.configure(cursor="hand2")
+            for item in (self._head, self._knob):
+                self.itemconfigure(item, state="normal")
             self._morph_to(levels)
 
     def set_levels(self, seed: str, levels: list[float]) -> None:
@@ -1431,7 +1615,8 @@ class WaveSeek(tk.Canvas):
         self.a = list(self.b)
         self.morph = 1.0
         self.last = [-1.0] * n
-        self.tag_raise(self._label)
+        for item in (self._head, self._knob, self._label):  # por encima de las barras nuevas
+            self.tag_raise(item)
         self._painted_key = (-1, -1)
         self._dirty = self._full = True
         self.anim.wake()
@@ -1440,6 +1625,8 @@ class WaveSeek(tk.Canvas):
         self.c.update(bg=bg, rest=rest, ahead=ahead, accent=accent, fg=fg)
         self.configure(bg=bg)
         self.itemconfigure(self._label, fill=fg)
+        self.itemconfigure(self._head, fill=fg)
+        self.itemconfigure(self._knob, fill=fg)
         self._painted_key = (-1, -1)
         self._dirty = True
         self.anim.wake()
@@ -1511,6 +1698,13 @@ class WaveSeek(tk.Canvas):
             moving = True
         else:
             self.shown = self.value
+        knob = 1.0 if self.hover_x is not None or self.dragging else 0.0
+        if abs(self.knob - knob) > 0.02 and not reduced:
+            self.knob += (knob - self.knob) * 0.35
+            moving = True
+        elif self.knob != knob:
+            self.knob = knob
+            self._dirty = True
         if self.morph < 1.0:
             self.morph = min(1.0, (now - self._m0) / 0.6)
             moving = self._full = True
@@ -1551,6 +1745,11 @@ class WaveSeek(tk.Canvas):
                 x = i * step
                 self.coords(self.bars[i], x, floor - h, x + bw, floor)
         self._recolor(int(head), n)
+        x = self.shown / 1000 * max(1, self.winfo_width())
+        top = floor - H - 3 * self.k
+        self.coords(self._head, x, top, x, floor)
+        r = (2.5 + 2.5 * self.knob) * self.k
+        self.coords(self._knob, x - r, top - r, x + r, top + r)
 
     def _recolor(self, played: int, n: int) -> None:
         hover = -1 if self.hover_x is None else int(self.hover_x / max(1, self.winfo_width()) * n)
@@ -1605,6 +1804,9 @@ class RowList(tk.Canvas):
         self._press_y = 0
         self._dragging = False
         self._drop_line = None
+        self._full: dict[int, str] = {}  # filas recortadas: su texto completo se ve al pasar
+        self.tip = PointerTip(self, anim, lambda: (blend(self.c["bg"], self.c["fg"], 0.14),
+                                                   self.c["fg"]))
         self.bind("<Configure>", self._resized)
         self.bind("<ButtonPress-1>", self._press)
         self.bind("<Double-Button-1>", self._double)
@@ -1679,6 +1881,7 @@ class RowList(tk.Canvas):
         self._sel_items.clear()
         self._hover_item = None
         self.pos, self.text_ids, self.sub_ids = [], [], []
+        self._full = {}
         width = self._width or self.winfo_reqwidth()
         pad = self.pad
         y = int(2 * self.k)
@@ -1696,6 +1899,9 @@ class RowList(tk.Canvas):
                 self.create_text(width - pad, y + h // 2, anchor="e", text=right,
                                  font=self.fonts["small"], fill=self.c["faint"])
             sub_text = None if hdr else it.get("sub")
+            if elide(font, it["text"], room) != it["text"] or (
+                    sub_text and elide(self.fonts["small"], sub_text, room) != sub_text):
+                self._full[i] = it["text"] + ("\n" + sub_text if sub_text else "")
             if sub_text:
                 self.text_ids.append(self.create_text(
                     pad, y + h * 0.32, anchor="w", text=elide(font, it["text"], room),
@@ -1755,6 +1961,7 @@ class RowList(tk.Canvas):
             self._hover_item = self.create_image(0, y, anchor="nw",
                                                  image=self._pill(h, self.c["hover"]))
             self.tag_lower(self._hover_item)
+        self.tip.set(self._full.get(i) if i is not None else None)
 
     # ---------- interacción ----------
     def _hit(self, y: float) -> int | None:
@@ -1769,6 +1976,7 @@ class RowList(tk.Canvas):
         self._set_hover(i)
 
     def _press(self, e) -> None:
+        self.tip.hide()
         self.focus_set()
         i = self._hit(self.canvasy(e.y))
         self._press_y = e.y
