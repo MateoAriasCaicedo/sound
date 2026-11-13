@@ -13,7 +13,7 @@ import yt_dlp
 from mutagen import MutagenError
 from mutagen.mp4 import MP4, MP4Cover
 
-from . import autogenre, errors, library, media, ytsearch
+from . import autogenre, errors, library, media, mp4fix, ytsearch
 from . import cookies as _cookies
 from . import log as _log
 from .config import MAX_PARALLEL as MAX_PARALLEL  # noqa: F401 - API que usa service
@@ -277,6 +277,8 @@ def download_track(
     genre_future = _ENRICH_POOL.submit(autogenre.lookup, track) if not genre else None
     try:
         _download_audio(track["video_id"], str(final.with_suffix(".%(ext)s")), on_progress)
+        # sin ffmpeg el .m4a llega fragmentado y Windows lo daría por terminado al empezar
+        mp4fix.defragment(final)
         track = enriching.result()
         if not genre and genre_future is not None:
             try:

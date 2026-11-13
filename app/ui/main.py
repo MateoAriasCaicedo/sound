@@ -28,8 +28,9 @@ from ..core import (
 from ..core import cookies as cookies_store
 from ..core import log as _log
 from ..core import lyrics as lyrics_store
+from ..core import playlists as playlists_store
 from ..core.filters import fold
-from . import home, prefs, session
+from . import home, prefs, session, window_state
 from .anim import Animator, ease_in_out
 from .cover_grid import CoverGrid, album_key, artist_key, group_albums
 from .downloads import DownloadsController
@@ -136,7 +137,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.side_items: list[tuple[str, str | None, str]] = []  # (tipo, nombre, texto)
         self._genres_open = False  # géneros de una sola canción desplegados en el lateral
         self.sel_keys: set[tuple[str, str | None]] = {("home", None)}
-        self.view_kind = "home"  # home | all | lib | liked | recent | top
+        self.view_kind = "home"  # home | all | lib | liked | recent | top | playlist
+        self.playlists: list[dict] = []    # listas propias (se releen al dibujar el lateral)
+        self.playlist_id: int | None = None  # la lista abierta, con view_kind == "playlist"
         self._home_per = 0       # canciones por estantería en «Inicio» (una fila de portadas)
         self.liked: set[str] = set()  # ids marcados con «Me gusta» (se recarga con la biblioteca)
         self.yt_genres: list[str] = []
@@ -170,11 +173,18 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._disk_dialog_shown = False
         self.damaged: set[str] = set()  # archivos locales incompletos: se conservan y se pueden rehacer
         self.prefs = prefs.load()
+        # tamaño, posición y si estaba maximizada: como se dejó la última vez
+        self._normal_geometry: str | None = None
+        self._zoomed = False
+        self._restore_window()
+        self.bind("<Configure>", self._window_moved, add="+")
         self._dupes_seen = int(self.prefs.get("dupes_seen", 0) or 0)  # repetidas ya avisadas
         self._mini_pos = self.prefs.get("mini_pos")  # dónde se dejó el mini reproductor
         self.mini = None          # el mini reproductor, creado la primera vez que se abre
         self.mini_on = False
         self.taskbar = None       # botones bajo la miniatura de la barra de tareas
+        self.system_media = None  # teclas multimedia y panel multimedia de Windows
+        self._timeline_tick = 0
         self.mini_taskbar = None
         # pantalla «Reproduciendo» (la canción en grande), creada la primera vez que se abre
         self.now_view = None
@@ -240,6 +250,10 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.resume_track: dict | None = None  # sesión anterior: suena al pulsar play
         self.resume_position = 0
         self.pending_seek: tuple[str, int] | None = None  # (video_id, ms) tras reanudar
+        # dónde iba la canción en un momento conocido (inicio o último salto): con esto se nota
+        # si Windows la da por terminada antes de lo posible
+        self._clock_ref: tuple[int, float] = (0, time.monotonic())
+        self._fix_retried: set[str] = set()  # canciones ya reintentadas tras convertirlas
         # historial: segundos escuchados de la canción actual, para contarla una sola vez
         self._listen_s = 0.0
         self._listen_vid: str | None = None
@@ -254,6 +268,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.refresh_library()
         self._restore_session()
         self.waves.sweep((t["video_id"], t["path"]) for t in self.library)
+        threading.Thread(target=self._fix_fragmented, daemon=True, name="mp4fix").start()
         self._load_yt_genres()
         threading.Thread(target=self._warm_search, daemon=True, name="calentar-busqueda").start()
         threading.Thread(target=self.dl.start_service, daemon=True).start()
@@ -282,6 +297,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.after(1200, self._check_environment)
         self.after(DUPES_CHECK_MS, self._check_duplicates)
         self.after(1500, self._setup_taskbar)  # cuando el icono de la barra de tareas ya existe
+        self.after(600, self._setup_system_media)
         self.after(AUTO_UPDATE_DELAY_MS, self._maybe_auto_update)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.anim.tween("window", 260, lambda p: self.attributes("-alpha", p),
@@ -380,7 +396,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         side.rowconfigure(0, weight=1)
         side.columnconfigure(0, weight=1)
         self.side = side
-        self.genres = RowList(side, self.anim, k, f, on_select=self._pick_genre)
+        self.genres = RowList(side, self.anim, k, f, on_select=self._pick_genre,
+                              on_context=self._side_context)
         self.genres.configure(width=int((SIDE_W - 14) * k))
         self.genres.grid(row=0, column=0, sticky="nsew")
         self.sb_genres = ttk.Scrollbar(side, orient="vertical",
@@ -437,6 +454,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.tree.bind("<Return>", self._on_double)
         self.tree.bind("<Button-3>", self._context)
         self.tree.bind("<Delete>", lambda e: self.delete_selected())
+        self.tree.bind("<Alt-Up>", lambda e: self._move_key(-1))
+        self.tree.bind("<Alt-Down>", lambda e: self._move_key(1))
         self.tree.bind("<Motion>", self._row_hover)
         self.tree.bind("<Leave>", self._tree_leave)
         self.tree.bind("<ButtonRelease-1>", self._tree_click)
@@ -450,6 +469,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.grid.grid(row=1, column=0, sticky="nsew")
         self.grid.grid_remove()
         self.grid.bind("<Delete>", lambda e: self.delete_selected())
+        for seq, delta in (("<Alt-Left>", -1), ("<Alt-Up>", -1), ("<Alt-Right>", 1),
+                           ("<Alt-Down>", 1)):
+            self.grid.bind(seq, lambda e, d=delta: self._move_key(d))
         self.empty = tk.Label(mid, font=f["body"])
 
         # panel «A continuación»: vive fuera de la vista y entra deslizándose
@@ -1233,6 +1255,22 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         items = [("home", None, "Inicio"), ("all", None, "Todo"), ("liked", None, "Me gusta"),
                  ("recent", None, "Recientes"), ("top", None, "Más escuchado")]
         rights = ["", str(len(self.library)), str(len(self.liked)), "", ""]
+        # tus listas, con su botón para crear otra
+        try:
+            self.playlists = playlists_store.all_playlists()
+        except Exception as exc:  # noqa: BLE001 - sin listas, el resto del lateral sigue
+            _log.failure(log, "no se pudieron leer las listas", exc)
+            self.playlists = []
+        items.append(("hdr", None, "Tus listas"))
+        rights.append("")
+        for pl in self.playlists:
+            items.append(("pl", pl["id"], pl["name"]))
+            rights.append(str(pl["count"]) if pl["count"] else "")
+        items.append(("newpl", None, "＋ Nueva lista"))
+        rights.append("")
+        if counts:
+            items.append(("hdr", None, "Géneros"))
+            rights.append("")
         # los géneros de una sola canción se pliegan: la lista se lee de un vistazo
         chosen = {n for k, n in self.sel_keys if k == "lib"}
         few = [g for g, n in counts.items() if n == 1 and g not in chosen]
@@ -1275,14 +1313,19 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self._genres_open = not self._genres_open
             self._build_sidebar()
             return
+        if any(s[0] == "newpl" for s in sel):
+            self.new_playlist()
+            return
         if not sel:
             return
         self.close_views()
         self.decade = None  # cada sección empieza sin filtro de década
         had_query = bool(self.query.get())
-        special = next((s for s in sel if s[0] in ("home", "liked", "recent", "top")), None)
+        special = next((s for s in sel if s[0] in ("home", "liked", "recent", "top", "pl")),
+                       None)
         if special:
-            self.view_kind = special[0]
+            self.view_kind = "playlist" if special[0] == "pl" else special[0]
+            self.playlist_id = special[1] if special[0] == "pl" else None
             self.genre_filter = set()
             self.yt_sel = []
             self.sel_keys = {(special[0], special[1])}
@@ -1335,7 +1378,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         q = self.query.get().strip()
         if q:
             self.close_views()  # buscar sale de la página de álbum o artista
-        if q and self.view_kind in ("home", "liked", "recent", "top"):
+        if q and self.view_kind in ("home", "liked", "recent", "top", "playlist"):
             # buscar desde una vista especial busca en toda la biblioteca
             self.view_kind = "all"
             self.genre_filter = set()
@@ -1443,6 +1486,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             local, remote = self._sub_view_rows(top), []
         elif self.view_kind == "home" and not q:
             (local, sections), remote = self._home_rows(), []
+        elif self.view_kind == "playlist":
+            local, remote = self._playlist_rows(self.playlist_id), []
         elif self.view_kind == "liked":
             # las filas de la biblioteca (con año, pista…), en el orden en que se marcaron
             local = [self.lib_by_id[t["video_id"]] for t in favorites.liked_tracks()
@@ -1477,6 +1522,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         elif sections is not None:
             self.status.configure(text="Lo último que escuchaste, lo que más suena y lo nuevo"
                                   if local else "")
+        elif self.view_kind == "playlist":
+            self.status.configure(text=self._playlist_status(local))
         elif not self.searching:
             msg = f"{len(local)} en biblioteca"
             if remote:
@@ -1621,6 +1668,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             return self.sub_view["title"]
         if self.view_kind == "home":
             return home.greeting(datetime.datetime.now().hour)
+        if self.view_kind == "playlist":
+            return self._playlist_name(self.playlist_id) or "Lista"
         if self.view_kind == "liked":
             return "Me gusta"
         if self.view_kind == "recent":
@@ -1804,6 +1853,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             text = "Aún no has marcado ninguna canción. Pulsa ♡ en una portada o en el reproductor."
         elif self.view_kind in ("recent", "top"):
             text = "Todavía no hay reproducciones registradas."
+        elif self.view_kind == "playlist":
+            text = ("Esta lista está vacía. Añade canciones con clic derecho → «Añadir a lista»\n"
+                    "desde la biblioteca, una búsqueda o un álbum.")
         else:
             text = "Aún no hay nada aquí. Busca una canción arriba para empezar."
         self.empty.configure(text=text)
@@ -2307,6 +2359,14 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                           variable=self.var_normalize, command=self.toggle_normalize)
         m.add_separator()
         m.add_command(label="Diagnóstico del entorno…", command=self.open_health)
+        if self._in_playlist():  # la lista abierta, también desde aquí
+            pid = self.playlist_id
+            m.add_separator()
+            m.add_command(label="Reproducir la lista", command=lambda: self._play_playlist(pid))
+            m.add_command(label="Renombrar la lista", command=lambda: self.rename_playlist(pid))
+            m.add_command(label="Exportar la lista a M3U…",
+                          command=lambda: self.export_playlist(pid))
+            m.add_command(label="Eliminar la lista", command=lambda: self.delete_playlist(pid))
         x = self.btn_more.winfo_rootx()
         y = self.btn_more.winfo_rooty() + self.btn_more.winfo_height()
         try:
@@ -2573,7 +2633,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def delete_selected(self) -> None:
         """Quita las canciones de la vista ya, pero no las borra del disco hasta que el aviso
-        desaparece: mientras tanto, «Deshacer» (o Ctrl+Z) las devuelve tal cual."""
+        desaparece: mientras tanto, «Deshacer» (o Ctrl+Z) las devuelve tal cual.
+
+        Dentro de una lista, Supr la quita de la lista: el archivo no se toca."""
+        if self._in_playlist():
+            self.remove_from_playlist()
+            return
         picks = [t for t in self._selected() if "path" in t]
         if not picks:
             return
@@ -2639,6 +2704,15 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         m.add_command(label="Reproducir a continuación",
                       command=lambda: self.enqueue(self._selected(), front=True))
         m.add_command(label="Añadir a la cola", command=lambda: self.enqueue(self._selected()))
+        m.add_cascade(label="Añadir a lista", menu=self._playlist_menu(m, self._selected()))
+        if self._in_playlist():
+            m.add_command(label="Quitar de esta lista", accelerator="Supr",
+                          command=self.remove_from_playlist)
+            if self._can_reorder():
+                m.add_command(label="Subir", accelerator="Alt+↑",
+                              command=lambda: self.move_in_playlist(-1))
+                m.add_command(label="Bajar", accelerator="Alt+↓",
+                              command=lambda: self.move_in_playlist(1))
         if self.pq.up_next:
             m.add_command(label=f"Vaciar cola ({len(self.pq.up_next)})", command=self.clear_queue)
         picks = self._selected()
@@ -2731,6 +2805,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         if self.sub_view is not None and self.sub_view["kind"] == "album":  # en su orden
             self.play_tracks(self.rows, i)
             return
+        if self._in_playlist():  # una lista suena en su orden (y luego sigue la cola automática)
+            self.play_tracks(self.rows, i, label=f"Lista «{self._view_title()}»")
+            return
         t = self.rows[i]
         self.pq.album = False
         self._play_from = self._view_title()
@@ -2748,12 +2825,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.pq.make_order(first)
         self._play_track(t)
 
-    def play_tracks(self, tracks: list[dict], first: int = 0) -> None:
+    def play_tracks(self, tracks: list[dict], first: int = 0, label: str | None = None) -> None:
         """Reproduce una lista concreta (un álbum) en su orden. Con la cola automática activa,
         al llegar a la última pista se piden canciones similares para seguir sin silencio."""
         if not 0 <= first < len(tracks):
             return
-        self._play_from = f"Álbum «{tracks[first].get('album') or 'sin título'}»"
+        self._play_from = label or f"Álbum «{tracks[first].get('album') or 'sin título'}»"
         self.pq.ctx, self.pq.auto_ctx = list(tracks), False
         self.pq.album = True
         self.pq.make_order(first)
@@ -3237,6 +3314,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.grid.see_row(int(iid))
         self.now.set(t["title"], t.get("artist") or "")
         self._refresh_now_heart()
+        self._system_media_track(t)
         if self.now_open:
             self._now_track()
             self._now_album()
@@ -3309,6 +3387,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self._set_track_gain(t, path)
         else:
             self.player.set_next_gain_db(0)  # streaming: no hay archivo que medir
+        if path:
+            self._ensure_playable(vid, path)
         try:
             if url:
                 self.player.load_url(url, key=vid, fade_ms=self.fade_ms, overlap=self.overlap)
@@ -3320,6 +3400,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             return
         self.transitioning_since = None
         self.auto_fired = None
+        self._clock_ref = (0, time.monotonic())
         self.player.set_volume(self.vol.get())
         if self.pending_seek:
             seek_vid, ms = self.pending_seek
@@ -3330,6 +3411,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                     if self.player.length and ms > self.player.length - 5000:
                         ms = 0  # estaba prácticamente al final: mejor empezar de nuevo
                     self.player.seek(ms)
+                    self._clock_ref = (ms, time.monotonic())
                 except Exception as exc:  # noqa: BLE001 - reanudar es una mejora, no un requisito
                     _log.failure(log, f"no se pudo reanudar en {ms} ms", exc)
         self.btn_play.configure(text="⏸")
@@ -3511,7 +3593,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def _seek_release(self, _e) -> None:
         self.seeking = False
         if self.player.loaded and self.player.length:
-            self.player.seek(self.scale.get() / 1000 * self.player.length)
+            ms = self.scale.get() / 1000 * self.player.length
+            self.player.seek(ms)
+            self._clock_ref = (int(ms), time.monotonic())
 
     def _tick(self) -> None:
         """Reprograma siempre: un fallo en un fotograma no debe congelar la reproducción."""
@@ -3522,6 +3606,279 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             _log.failure(log, "el tick de reproducción falló", exc)
         finally:
             self.after(400, self._tick)
+
+    # ---------- listas de reproducción ----------
+    def _in_playlist(self) -> bool:
+        """¿Se está viendo una lista (sin búsqueda ni página encima)?"""
+        return (self.view_kind == "playlist" and self.playlist_id is not None
+                and self.sub_view is None and not self.query.get().strip())
+
+    def _can_reorder(self) -> bool:
+        """Subir y bajar solo tienen sentido viendo la lista en su orden, sin filtros."""
+        return self._in_playlist() and self.sort is None and self.decade is None
+
+    def _playlist_name(self, pid: int | None) -> str:
+        return next((pl["name"] for pl in self.playlists if pl["id"] == pid), "")
+
+    def _playlist_rows(self, pid: int | None) -> list[dict]:
+        """Las canciones de una lista; las descargadas, con los datos de la biblioteca."""
+        if pid is None:
+            return []
+        try:
+            stored = playlists_store.tracks(pid)
+        except Exception as exc:  # noqa: BLE001 - una lista ilegible se ve vacía, no rompe nada
+            _log.failure(log, f"no se pudo leer la lista {pid}", exc)
+            return []
+        return [self.lib_by_id.get(t["video_id"]) or t for t in stored
+                if t["video_id"] not in self._hidden]
+
+    def _playlist_status(self, rows: list[dict]) -> str:
+        if not rows:
+            return ""
+        n = len(rows)
+        minutes = round(sum(t.get("duration") or 0 for t in rows) / 60)
+        parts = [f"{n} {'canción' if n == 1 else 'canciones'}"]
+        if minutes:
+            parts.append(f"{minutes // 60} h {minutes % 60} min" if minutes >= 60
+                         else f"{minutes} min")
+        missing = sum(1 for t in rows if t["video_id"] not in self.lib_by_id)
+        if missing:
+            parts.append(f"{missing} sin descargar")
+        return "  ·  ".join(parts)
+
+    def _playlist_menu(self, parent, tracks: list[dict]) -> tk.Menu:
+        """Submenú «Añadir a lista»: tus listas (✓ si ya tienen todo) y «Nueva lista…»."""
+        menu = self._menu(parent)
+        try:
+            inside = playlists_store.containing([t["video_id"] for t in tracks])
+        except Exception:  # noqa: BLE001 - solo es la marca
+            inside = set()
+        for pl in self.playlists:
+            menu.add_command(label=pl["name"] + ("  ✓" if pl["id"] in inside else ""),
+                             command=lambda pid=pl["id"]: self.add_to_playlist(pid, tracks))
+        if self.playlists:
+            menu.add_separator()
+        menu.add_command(label="Nueva lista…", command=lambda: self.new_playlist(tracks))
+        return menu
+
+    def _playlist_index(self, pid: int) -> int | None:
+        return next((i for i, (kind, n, _l) in enumerate(self.side_items)
+                     if kind == "pl" and n == pid), None)
+
+    def _select_playlist(self, pid: int) -> None:
+        """Abre la lista como si se hubiera pulsado en el lateral."""
+        self.sel_keys = {("pl", pid)}
+        self._build_sidebar()
+        index = self._playlist_index(pid)
+        if index is None:
+            return
+        self.genres.selection_clear()
+        self.genres.selection_set(index)
+        self.genres.see(index)
+        self._pick_genre()
+
+    def new_playlist(self, tracks: list[dict] | None = None) -> None:
+        """Crea una lista y deja escribir su nombre ahí mismo, en el lateral. Con `tracks`
+        (desde «Añadir a lista → Nueva lista…»), la lista nace con ellas y la vista no cambia."""
+        try:
+            pid = playlists_store.create(playlists_store.unique_name())
+            if tracks:
+                playlists_store.add(pid, tracks)
+        except Exception as exc:  # noqa: BLE001 - se avisa y la ventana sigue
+            _log.failure(log, "no se pudo crear la lista", exc)
+            self.toast.show("No se pudo crear la lista")
+            return
+        if tracks:
+            self._build_sidebar()
+            n = len(tracks)
+            self.toast.show(f"{n} {'canción añadida' if n == 1 else 'canciones añadidas'} "
+                            "a la lista nueva")
+        else:
+            self._select_playlist(pid)
+        self.after_idle(lambda: self.rename_playlist(pid))
+
+    def rename_playlist(self, pid: int) -> None:
+        """Un campo de texto sobre la fila de la lista: Intro guarda, Esc deja el nombre."""
+        index = self._playlist_index(pid)
+        if index is None:
+            return
+        side, k, p = self.genres, self.k, self.pal
+        y, h = side.pos[index]
+        if y < side.off or y + h > side.off + side.winfo_height():
+            side._apply_scroll(y - side.winfo_height() / 3)
+        old = self._playlist_name(pid)
+        entry = tk.Entry(side, font=self.fonts["body"], relief="flat", bd=0, bg=p["raised"],
+                         fg=p["fg"], insertbackground=p["fg"], selectbackground=p["sel"],
+                         selectforeground=p["fg"], highlightthickness=max(1, int(k)),
+                         highlightcolor=self.scheme.get("accent", p["accent"]),
+                         highlightbackground=p["line"])
+        entry.insert(0, old)
+        entry.select_range(0, "end")
+        entry.icursor("end")
+        entry.place(x=int(6 * k), y=int(y - side.off + 2 * k), height=h - int(4 * k),
+                    width=max(int(60 * k), side.winfo_width() - int(12 * k)))
+        finished = []
+
+        def finish(save: bool) -> None:
+            if finished:
+                return
+            finished.append(True)
+            name = entry.get().strip()
+            entry.destroy()
+            if save and name and name != old:
+                playlists_store.rename(pid, name)
+            self._build_sidebar()
+            if self.view_kind == "playlist" and self.playlist_id == pid and self.active_page is None:
+                self.header.set_title(self._view_title())
+            (self.grid if self.view_mode == "grid" else self.tree).focus_set()
+
+        entry.bind("<Return>", lambda e: (finish(True), "break")[1])
+        entry.bind("<KP_Enter>", lambda e: (finish(True), "break")[1])
+        entry.bind("<Escape>", lambda e: (finish(False), "break")[1])
+        entry.bind("<FocusOut>", lambda e: finish(True))
+        entry.focus_set()
+
+    def add_to_playlist(self, pid: int, tracks: list[dict]) -> None:
+        name = self._playlist_name(pid)
+        try:
+            present = {t["video_id"] for t in playlists_store.tracks(pid)}
+            new = [t for t in tracks if t["video_id"] not in present]
+            playlists_store.add(pid, new)
+        except Exception as exc:  # noqa: BLE001
+            _log.failure(log, "no se pudo añadir a la lista", exc)
+            self.toast.show(f"No se pudo añadir a «{name}»")
+            return
+        self._build_sidebar()
+        if self._in_playlist() and self.playlist_id == pid:
+            self.refresh_view()
+        if not new:
+            self.toast.show(f"Ya {'estaba' if len(tracks) == 1 else 'estaban'} en «{name}»")
+            return
+        what = f"«{new[0]['title']}»" if len(new) == 1 else f"{len(new)} canciones"
+        vids = [t["video_id"] for t in new]
+        self.toast.show(f"{what} {'añadida' if len(new) == 1 else 'añadidas'} a «{name}»",
+                        "Deshacer", on_action=lambda: self._undo_playlist_add(pid, vids))
+
+    def _undo_playlist_add(self, pid: int, vids: list[str]) -> None:
+        playlists_store.remove(pid, vids)
+        self._build_sidebar()
+        if self._in_playlist() and self.playlist_id == pid:
+            self.refresh_view()
+
+    def remove_from_playlist(self) -> None:
+        """Quita lo seleccionado de la lista abierta (con «Deshacer»); el archivo no se toca."""
+        pid, picks = self.playlist_id, self._selected()
+        if pid is None or not picks:
+            return
+        before = [t["video_id"] for t in playlists_store.tracks(pid)]
+        playlists_store.remove(pid, [t["video_id"] for t in picks])
+        self.tree.selection_remove(*self.tree.selection())
+        self._build_sidebar()
+        self.refresh_view()
+        what = f"«{picks[0]['title']}»" if len(picks) == 1 else f"{len(picks)} canciones"
+        self.toast.show(f"{what} {'quitada' if len(picks) == 1 else 'quitadas'} de "
+                        f"«{self._playlist_name(pid)}»", "Deshacer",
+                        on_action=lambda: self._undo_playlist_remove(pid, picks, before))
+
+    def _undo_playlist_remove(self, pid: int, picks: list[dict], before: list[str]) -> None:
+        playlists_store.add(pid, picks)
+        playlists_store.reorder(pid, before)
+        self._build_sidebar()
+        if self._in_playlist() and self.playlist_id == pid:
+            self.refresh_view()
+            self._reselect([t["video_id"] for t in picks])
+
+    def _reselect(self, vids: list[str]) -> None:
+        iids = [self.vid_iid[vid] for vid in vids if vid in self.vid_iid]
+        if not iids:
+            return
+        self.tree.selection_set(iids)
+        self._on_select()
+        if self.view_mode == "grid":
+            self.grid.see_row(int(iids[0]))
+        else:
+            self.tree.see(iids[0])
+
+    def move_in_playlist(self, delta: int) -> None:
+        """Sube (-1) o baja (+1) un puesto las canciones elegidas."""
+        if not self._can_reorder():
+            return
+        picked = [t["video_id"] for t in self._selected()]
+        order = [t["video_id"] for t in self.rows]
+        new = playlists_store.moved(order, set(picked), delta)
+        if new == order:
+            return
+        playlists_store.reorder(self.playlist_id, new)
+        self.refresh_view()
+        self._reselect(picked)
+
+    def _move_key(self, delta: int) -> str | None:
+        if not self._can_reorder():
+            return None
+        self.move_in_playlist(delta)
+        return "break"
+
+    def _play_playlist(self, pid: int) -> None:
+        rows = self._playlist_rows(pid)
+        if rows:
+            self.play_tracks(rows, 0, label=f"Lista «{self._playlist_name(pid)}»")
+        else:
+            self.toast.show("La lista está vacía")
+
+    def delete_playlist(self, pid: int) -> None:
+        """Borra la lista (no las canciones); «Deshacer» la recupera con todo."""
+        name = self._playlist_name(pid)
+        try:
+            tracks = playlists_store.tracks(pid)
+            playlists_store.delete(pid)
+        except Exception as exc:  # noqa: BLE001
+            _log.failure(log, "no se pudo eliminar la lista", exc)
+            self.toast.show(f"No se pudo eliminar «{name}»")
+            return
+        if self.view_kind == "playlist" and self.playlist_id == pid:
+            self.go_home()
+        else:
+            self._build_sidebar()
+        self.toast.show(f"Lista «{name}» eliminada", "Deshacer",
+                        on_action=lambda: self._restore_playlist(name, tracks))
+
+    def _restore_playlist(self, name: str, tracks: list[dict]) -> None:
+        pid = playlists_store.create(name)
+        playlists_store.add(pid, tracks)
+        self._select_playlist(pid)
+
+    def export_playlist(self, pid: int) -> None:
+        name = self._playlist_name(pid) or "lista"
+        dest = filedialog.asksaveasfilename(
+            parent=self, title=f"Exportar «{name}»", defaultextension=".m3u",
+            initialfile=re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .") + ".m3u",
+            filetypes=[("Lista M3U", "*.m3u"), ("Todos los archivos", "*.*")])
+        if not dest:
+            return
+        try:
+            count = library.export_m3u(Path(dest), tracks=self._playlist_rows(pid))
+        except OSError as exc:
+            self.toast.show(f"No se pudo exportar: {exc.strerror or exc}")
+            return
+        self.toast.show(f"{count} canciones exportadas a {Path(dest).name}")
+
+    def _side_context(self, i: int, x_root: int, y_root: int) -> None:
+        """Clic derecho en el lateral: las acciones de una lista."""
+        if not 0 <= i < len(self.side_items):
+            return
+        kind, pid, _label = self.side_items[i]
+        if kind != "pl":
+            return
+        m = self._menu()
+        m.add_command(label="Reproducir", command=lambda: self._play_playlist(pid))
+        m.add_command(label="Renombrar", command=lambda: self.rename_playlist(pid))
+        m.add_command(label="Exportar a M3U…", command=lambda: self.export_playlist(pid))
+        m.add_separator()
+        m.add_command(label="Eliminar lista", command=lambda: self.delete_playlist(pid))
+        try:
+            m.tk_popup(x_root, y_root)
+        finally:
+            m.grab_release()
 
     # ---------- pantalla «Reproduciendo» (la canción en grande) ----------
     @property
@@ -3703,8 +4060,39 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def _seek_ms(self, ms: int) -> None:
         """Clic en una línea de la letra: la canción salta a ese momento."""
         if self.player.loaded and self.player.length:
-            self.player.seek(max(0, min(int(ms), self.player.length - 500)))
+            ms = max(0, min(int(ms), self.player.length - 500))
+            self.player.seek(ms)
+            self._clock_ref = (ms, time.monotonic())
             self.scale.set(ms / self.player.length * 1000)
+
+    # ---------- ventana recordada ----------
+    def _restore_window(self) -> None:
+        saved = self.prefs.get("window") or {}
+        geometry = window_state.parse(saved.get("geometry")) if isinstance(saved, dict) else None
+        if geometry:
+            k = self.k
+            areas = window_state.work_areas() or [
+                (0, 0, self.winfo_screenwidth(), self.winfo_screenheight())]
+            # el tamaño guardado es el del contenido: se deja sitio al marco y a la barra de título
+            frame_w, frame_h = int(16 * k), int(40 * k)
+            areas = [(l_, t_, r_ - frame_w, b_ - frame_h) for l_, t_, r_, b_ in areas]
+            w, h, x, y = window_state.fit(geometry, areas, int(880 * k), int(560 * k))
+            self.geometry(f"{w}x{h}+{x}+{y}")
+            self._normal_geometry = f"{w}x{h}+{x}+{y}"
+        if isinstance(saved, dict) and saved.get("zoomed"):
+            self._zoomed = True
+            self.state("zoomed")
+
+    def _window_moved(self, e) -> None:
+        """Se apunta la geometría normal (la de antes de maximizar) para guardarla al cerrar."""
+        if e.widget is not self or self.fullscreen:
+            return
+        state = self.state()
+        if state == "normal":
+            self._zoomed = False
+            self._normal_geometry = self.wm_geometry()
+        elif state == "zoomed":
+            self._zoomed = True
 
     # ---------- mini reproductor y barra de tareas ----------
     def _sync_outside(self) -> None:
@@ -3715,6 +4103,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                 buttons.set_playing(playing)
         if self.mini_on and self.mini is not None:
             self.mini.sync()
+        self._sync_system_media()
         if self.now_open:  # la línea de la letra y las barras de lo que suena
             try:
                 position = self.player.position() if self.player.loaded else self.resume_position
@@ -3786,6 +4175,52 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         margin = int(16 * self.k)
         return right - frame_w - margin, bottom - frame_h - margin
 
+    def _setup_system_media(self) -> None:
+        """Teclas ⏯ ⏭ ⏮ (teclado, auriculares) y el recuadro multimedia de Windows."""
+        from .media_keys import SystemMedia
+        self.system_media = SystemMedia.create(
+            on_button=lambda name: self.q.put(("media_key", name)),
+            on_seek=lambda ms: self.q.put(("media_seek", ms)))
+        if self.system_media is not None and self.cur_track is not None:
+            self._system_media_track(self.cur_track, self._cover_data)
+
+    def _system_media_track(self, t: dict, cover: bytes | None = None) -> None:
+        if self.system_media is not None:
+            try:
+                self.system_media.set_track(t.get("title") or "", t.get("artist") or "",
+                                            t.get("album") or "", cover)
+            except Exception as exc:  # noqa: BLE001 - el panel de Windows es un extra
+                _log.failure(log, "no se pudo actualizar el panel de Windows", exc)
+
+    def _sync_system_media(self) -> None:
+        """Estado y progreso en el panel de Windows (el progreso, cada ~2 s)."""
+        sm = self.system_media
+        if sm is None:
+            return
+        try:
+            if self.player.loaded:
+                sm.set_playing(not self.player.paused)
+                self._timeline_tick = (self._timeline_tick + 1) % 5
+                if self._timeline_tick == 0 and self.player.length:
+                    sm.set_timeline(self.player.position(), self.player.length)
+            else:
+                sm.set_playing(False if self.cur_track is not None else None)
+        except Exception as exc:  # noqa: BLE001
+            _log.failure(log, "no se pudo actualizar el panel de Windows", exc)
+            self.system_media = None  # no insistir en cada tick
+
+    def _on_media_key(self, name: str) -> None:
+        """Una tecla multimedia (o un botón del panel de Windows)."""
+        playing = self.player.loaded and not self.player.paused
+        if name == "next":
+            self.step(1)
+        elif name == "previous":
+            self.step(-1)
+        elif name == "play" and not playing:
+            self.play_pause()
+        elif name in ("pause", "stop") and playing:
+            self.play_pause()
+
     def _setup_taskbar(self) -> None:
         from .taskbar import TaskbarButtons
         self.taskbar = TaskbarButtons(int(self.wm_frame(), 16), self._thumb_clicked)
@@ -3827,6 +4262,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                         actual = self.player.length or self.player.position()
                         if self._track_truncated(actual):
                             self._stop_damaged(actual)
+                        elif self._impossible_end(actual):
+                            self._halt_impossible()
                         else:
                             self.step(1, auto=True)  # fin natural sin mezcla anticipada
                 elif not self.seeking and self.player.length:
@@ -3935,6 +4372,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.mini.show_cover(img, seed)
         color = (dominant_color(img) if img else None) or (seed_color(seed) if seed else None)
         self._cover_color = color
+        if self.cur_track is not None:
+            self._system_media_track(self.cur_track, data)
         if self.now_view is not None:
             self.now_view.set_art(img, seed, color)
         self._set_ambient(color)
@@ -3976,10 +4415,13 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                 "view": self.view_pref, "lyrics": self.lyrics_enabled,
                 "dupes_seen": self._dupes_seen, "mini_pos": self._mini_pos,
                 "now_tab": self._now_tab,
+                "window": {"geometry": self._normal_geometry, "zoomed": self._zoomed},
                 "ytdlp_checked_at": self._ytdlp_checked_at}
 
     def _close(self) -> None:
         self.toast.flush()  # un borrado a la espera de «Deshacer» se confirma al cerrar
+        if self.system_media is not None:
+            self.system_media.close()
         if self.mini is not None and self.mini_on:
             self._remember_mini_pos()
         self._save_session()

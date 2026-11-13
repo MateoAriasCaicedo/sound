@@ -1,5 +1,31 @@
 # Cambios
 
+## Sin publicar
+
+### Arreglado
+- **Al hacer doble clic sonaba otra canción (o varias seguidas, al azar).** Sin ffmpeg, las
+  canciones se guardaban en el MP4 «fragmentado» que entrega YouTube, y Windows las daba por
+  terminadas nada más empezar: la cola saltaba de una en una (al azar con el orden aleatorio).
+  Ahora se convierten a MP4 normal, sin recodificar ni perder calidad ni etiquetas: al
+  descargarlas y, las que ya tenías, una sola vez al abrir la app. Si una canción vuelve a
+  terminar antes de lo posible, la cola se detiene con un aviso en vez de encadenar saltos.
+
+### Listas de reproducción
+- **Tus listas** en el lateral: «＋ Nueva lista» la crea y su nombre se escribe ahí mismo.
+- «Añadir a lista» en el clic derecho de canciones, resultados de búsqueda y álbumes (✓ si ya
+  están), o «Nueva lista…» con lo seleccionado. Admiten canciones aún sin descargar.
+- Dentro de una lista: suena en su orden (y luego sigue la cola automática), `Supr` quita
+  canciones de la lista sin borrar el archivo, `Alt+↑/↓` las sube o baja, y todo se puede
+  deshacer. Clic derecho en la lista para reproducirla, renombrarla, exportarla a M3U o
+  eliminarla.
+
+### Windows
+- **Teclas multimedia** (⏯ ⏭ ⏮ del teclado o de auriculares Bluetooth) y el **panel multimedia
+  de Windows** (el recuadro que sale al cambiar el volumen): portada, título, artista, progreso
+  y controles de Sound, también desde la pantalla de bloqueo.
+- La ventana **recuerda su tamaño, su posición y si estaba maximizada**; si el monitor donde
+  estaba ya no existe, vuelve a una pantalla visible.
+
 ## 1.2.0 — 2026-11-12
 
 ### Reproduciendo, en grande

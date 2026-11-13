@@ -36,6 +36,10 @@ class _Slot:
         self.linger_until = 0.0  # paso sin hueco: no se cierra antes de esta hora (monotonic)
         self.mp = MediaPlayer()
         self.mp.auto_play = False
+        try:  # las teclas multimedia van a la ventana (media_keys), no a cada reproductor
+            self.mp.command_manager.is_enabled = False
+        except Exception:  # noqa: BLE001 - Windows sin esa API: se queda como estaba
+            pass
         self.mp.add_media_ended(lambda *_: setattr(self, "ended", True))
         # error_message suele venir vacío: guardamos siempre un texto no vacío
         self.mp.add_media_failed(lambda _s, a: setattr(
@@ -104,6 +108,12 @@ class Player:
 
     def is_prepared(self, key: str) -> bool:
         return key in self._prepared
+
+    def forget(self, key: str) -> None:
+        """Descarta la versión preparada de `key` (su archivo cambió en disco)."""
+        slot = self._prepared.pop(key, None)
+        if slot is not None:
+            slot.close()
 
     def _play(self, slot: _Slot, fade_ms: int = 0, overlap: bool = False) -> None:
         """Empieza `slot`. Con `fade_ms` entra con fundido y la actual sale a la vez (crossfade).

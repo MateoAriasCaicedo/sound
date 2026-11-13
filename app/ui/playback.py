@@ -4,6 +4,7 @@ Se extrae aquí la lógica que decide qué suena después y cuándo se mezcla, p
 ``main.App`` no acumule todo en un solo archivo. El mixin asume que ``self`` es la
 instancia de ``App`` (acceso a ``player``, ``pq``, ``cur_track``, etc.).
 """
+import time
 from pathlib import Path
 
 from ..core import waveform
@@ -71,6 +72,7 @@ class PlaybackMixin:
         local = t.get("path") or (self.lib_by_id.get(vid) or {}).get("path")
         try:
             if local and Path(local).exists():
+                self._ensure_playable(vid, local)
                 self.player.prepare_path(vid, local)
                 return True
             from ..core import streaming
@@ -84,6 +86,63 @@ class PlaybackMixin:
             return False
         self._resolve_ahead([vid])
         return False
+
+    # ---------- archivos que Windows no sabe reproducir ----------
+    def _ensure_playable(self, vid: str, path: str) -> None:
+        """Windows da por terminado al empezar el .m4a fragmentado que entrega YouTube (sin
+        ffmpeg se guarda así): antes de sonar se convierte a MP4 normal, sin recodificar."""
+        from ..core import mp4fix
+        if mp4fix.is_fragmented(path):
+            self.player.forget(vid)  # una versión ya preparada del archivo viejo no serviría
+            if mp4fix.defragment(path):
+                from ..core import log as _log
+                _log.get("ui").info("convertida a MP4 normal antes de sonar: %s", Path(path).name)
+
+    def _fix_fragmented(self) -> None:
+        """Al arrancar, en segundo plano: toda la biblioteca pasa a MP4 normal (una sola vez;
+        luego ya no queda ninguna fragmentada y el repaso solo lee cabeceras)."""
+        from ..core import log as _log
+        from ..core import mp4fix
+        fixed = 0
+        for track in list(self.library):
+            try:
+                if mp4fix.is_fragmented(track["path"]) and mp4fix.defragment(track["path"]):
+                    fixed += 1
+            except Exception as exc:  # noqa: BLE001 - una canción rara no detiene el repaso
+                _log.failure(_log.get("ui"), f"no se pudo revisar {track.get('path')}", exc)
+        if fixed:
+            _log.get("ui").info("%d canciones convertidas a MP4 normal para Windows", fixed)
+
+    def _impossible_end(self, position_ms: int) -> bool:
+        """¿La canción «llegó» más lejos de lo que da el tiempo que lleva sonando? Pasa cuando
+        Windows no puede leer el audio: la da por terminada al instante y, sin este freno, la
+        cola saltaba de canción en canción (al azar, con el orden aleatorio)."""
+        ref_ms, since = self._clock_ref
+        elapsed_ms = (time.monotonic() - since) * 1000
+        return position_ms > ref_ms + elapsed_ms * 1.5 + 4000
+
+    def _halt_impossible(self) -> None:
+        """Para en vez de encadenar saltos; si era un archivo por convertir, lo convierte y
+        vuelve a intentarlo una vez."""
+        t = self.cur_track or {}
+        vid = t.get("video_id")
+        local = (t.get("path") or (self.lib_by_id.get(vid) or {}).get("path")) if vid else None
+        self.player.stop()
+        self.transitioning_since = None
+        self.auto_fired = None
+        from ..core import log as _log
+        from ..core import mp4fix
+        if vid and local and vid not in self._fix_retried and mp4fix.is_fragmented(local):
+            self._fix_retried.add(vid)
+            self._play_track(t, "cut")  # _start la convierte antes de cargarla
+            return
+        self.btn_play.configure(text="▶")
+        title = t.get("title") or "la canción"
+        _log.get("ui").warning("Windows terminó %s (%s) nada más empezar; se detiene la cola",
+                               title, vid)
+        self.status.configure(text=f"No se pudo reproducir «{title}»")
+        self.toast.show(f"Windows no pudo reproducir «{title}»: se detuvo para no saltar "
+                        "entre canciones", "Reintentar", lambda: self._play_track(t))
 
     def _track_truncated(self, actual_ms: int) -> bool:
         """¿La canción local que suena dura mucho menos de lo anunciado? Los streams no se juzgan."""
@@ -148,6 +207,9 @@ class PlaybackMixin:
             return
         rem = p.length - pos
         if rem > PREPARE_WINDOW_MS:
+            return
+        if self._impossible_end(pos):  # Windows la «terminó» de golpe: no se encadena otra
+            self._halt_impossible()
             return
         if self._track_truncated(p.length):
             self._stop_damaged(p.length)

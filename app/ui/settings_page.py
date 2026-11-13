@@ -193,7 +193,8 @@ class SettingsPage(Page):
             ("Ctrl+↑ / ↓", "Subir o bajar el volumen"),
             ("Espacio", "Reproducir o pausar"),
             ("Intro", "Reproducir la canción seleccionada o abrir el álbum"),
-            ("Supr", "Eliminar de la biblioteca / quitar de la cola"),
+            ("Supr", "Eliminar de la biblioteca / quitar de la lista o de la cola"),
+            ("Alt+↑ / ↓", "Subir o bajar canciones dentro de una lista"),
             ("Esc", "Salir de la vista en grande, volver a la biblioteca, salir del álbum o "
                     "cerrar «A continuación»"),
         )

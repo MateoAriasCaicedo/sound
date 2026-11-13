@@ -22,6 +22,7 @@ hiddenimports = (
     + [
         "winrt.windows.foundation",
         "winrt.windows.foundation.collections",
+        "winrt.windows.media",
         "winrt.windows.media.core",
         "winrt.windows.media.playback",
         "winrt.windows.storage.streams",

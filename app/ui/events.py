@@ -96,6 +96,10 @@ class EventLoopMixin:
                     self.grid.set_cover(ev[1], ev[2])
                 elif kind == "thumb_button":
                     self._on_thumb_button(ev[1])
+                elif kind == "media_key":
+                    self._on_media_key(ev[1])
+                elif kind == "media_seek":
+                    self._seek_ms(ev[1])
                 elif kind == "track_numbers":
                     self._on_track_numbers(ev[1], ev[2])
                 elif kind == "duplicates":

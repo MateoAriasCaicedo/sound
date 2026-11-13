@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS plays (
     artist TEXT NOT NULL,
     played_at TEXT DEFAULT CURRENT_TIMESTAMP  -- UTC, 'AAAA-MM-DD HH:MM:SS'
 );
+-- Listas de reproducción propias. Cada canción guarda título, artista… para poder incluir
+-- también las que aún no están descargadas (suenan por streaming). Una canción, una vez por lista.
+CREATE TABLE IF NOT EXISTS playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS playlist_tracks (
+    playlist_id INTEGER NOT NULL,
+    video_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT,
+    duration INTEGER,
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (playlist_id, video_id)
+);
+CREATE INDEX IF NOT EXISTS playlist_tracks_order ON playlist_tracks (playlist_id, position);
 CREATE INDEX IF NOT EXISTS plays_by_video ON plays (video_id);
 CREATE INDEX IF NOT EXISTS plays_by_time ON plays (played_at);
 CREATE INDEX IF NOT EXISTS tracks_by_artist ON tracks (artist COLLATE NOCASE);
@@ -60,7 +79,7 @@ CREATE INDEX IF NOT EXISTS tracks_by_genre ON tracks (genre COLLATE NOCASE);
 """
 
 QUEUE_FIELDS = ("video_id", "title", "artist", "album", "duration", "cover", "genre")
-SCHEMA_VERSION = 3  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
+SCHEMA_VERSION = 4  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
 # Columnas añadidas después de la primera versión: se agregan a bases de datos ya existentes.
 _ADDED_COLUMNS = {
     # track_no: posición en su álbum; se pide a YouTube Music la primera vez que se abre el álbum
@@ -196,13 +215,15 @@ def remove_missing(db_path: Path | None = None) -> int:
     return len(missing)
 
 
-def export_m3u(dest: Path, db_path: Path | None = None) -> int:
+def export_m3u(dest: Path, db_path: Path | None = None, tracks: list[dict] | None = None) -> int:
     """Escribe una lista M3U extendida con las canciones que siguen en disco.
 
+    Sin `tracks`, la biblioteca entera; con ellas (una lista de reproducción), en su orden.
     Las rutas son absolutas: el archivo se puede abrir desde cualquier reproductor. Devuelve
     cuántas canciones se escribieron.
     """
-    tracks = [t for t in all_tracks(db_path) if Path(t["path"]).exists()]
+    source = all_tracks(db_path) if tracks is None else tracks
+    tracks = [t for t in source if t.get("path") and Path(t["path"]).exists()]
     lines = ["#EXTM3U"]
     for track in tracks:
         duration = int(track.get("duration") or -1)
