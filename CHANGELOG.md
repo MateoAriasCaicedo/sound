@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 1.2.0 — 2026-11-12
 
 ### Reproduciendo, en grande
 - **Vista «Reproduciendo»**: la canción que suena en grande, sobre su portada desenfocada, con
