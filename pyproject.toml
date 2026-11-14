@@ -1,6 +1,6 @@
 [project]
 name = "sound"
-version = "1.2.0"
+version = "1.3.0"
 description = "Descarga, organiza y reproduce música de YouTube Music en el escritorio"
 readme = "README.md"
 license = {file = "LICENSE"}

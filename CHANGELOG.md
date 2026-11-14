@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 1.3.0 — 2026-11-14
 
 ### Arreglado
 - **Al hacer doble clic sonaba otra canción (o varias seguidas, al azar).** Sin ffmpeg, las
