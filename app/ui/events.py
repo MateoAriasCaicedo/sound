@@ -94,6 +94,8 @@ class EventLoopMixin:
                 elif kind == "thumb":
                     self._thumbs_pending.discard(ev[1])
                     self.grid.set_cover(ev[1], ev[2])
+                elif kind == "hero_art":  # portada de la cabecera (hero.py)
+                    self._hero_art_loaded(ev[1], ev[2], ev[3])
                 elif kind == "thumb_button":
                     self._on_thumb_button(ev[1])
                 elif kind == "media_key":
@@ -151,6 +153,14 @@ class EventLoopMixin:
                             if checked else
                             "No se pudo comprobar si hay una versión nueva de yt-dlp. "
                             "Revisa la conexión o actualízalo desde Descargas.")
+                elif kind == "app_update":  # versión nueva de Sound (app_updates.py)
+                    self._app_update_checked(ev[1], ev[2], ev[3])
+                elif kind == "app_update_progress":
+                    self._app_update_progressed(ev[1], ev[2])
+                elif kind == "app_update_ready":
+                    self._app_update_ready(ev[1])
+                elif kind == "app_update_failed":
+                    self._app_update_failed(ev[1])
                 elif kind == "outdated":
                     if self.auto_update:
                         self.status.configure(

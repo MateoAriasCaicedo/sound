@@ -23,6 +23,11 @@ def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def is_frozen() -> bool:
+    """¿Es la app instalada (PyInstaller)? En desarrollo, desde el código, es False."""
+    return _is_frozen()
+
+
 def _env_path(name: str) -> Path | None:
     value = os.environ.get(name, "").strip()
     return Path(value) if value else None

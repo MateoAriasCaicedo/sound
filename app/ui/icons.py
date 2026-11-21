@@ -185,6 +185,16 @@ def _stage(d, w):
     _line(d, [(14.5, 14), (16.8, 14)], w)
 
 
+def _chevron_left(d, w):
+    """Atrás, en la barra de arriba."""
+    _line(d, [(14.5, 5.5), (8, 12), (14.5, 18.5)], w)
+
+
+def _chevron_right(d, w):
+    """Adelante."""
+    _line(d, [(9.5, 5.5), (16, 12), (9.5, 18.5)], w)
+
+
 def _chevron_down(d, w):
     """Cerrar la pantalla «Reproduciendo»: vuelve hacia el reproductor, abajo."""
     _line(d, [(5.5, 9), (12, 15.5), (18.5, 9)], w)
@@ -214,7 +224,8 @@ _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=
               theme=_theme, downloads=_downloads, note=_note, back=_back, link=_link,
               more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list,
               heart=_heart, heart_fill=_heart_fill, mini=_mini, expand=_expand,
-              shrink=_shrink, stage=_stage, chevron_down=_chevron_down)
+              shrink=_shrink, stage=_stage, chevron_down=_chevron_down,
+              chevron_left=_chevron_left, chevron_right=_chevron_right)
 
 
 def names() -> list[str]:

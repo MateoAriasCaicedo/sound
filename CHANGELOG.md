@@ -1,5 +1,64 @@
 # Cambios
 
+## Sin publicar
+
+### Navegación
+- **Atrás y Adelante, como en un navegador**: botones ‹ › junto al buscador, `Alt+←` / `Alt+→`
+  y los botones laterales del ratón. Recorren todo (Inicio, secciones, listas, artistas, álbumes,
+  búsquedas y páginas como Ajustes) y, al volver, cada sitio queda como estaba: desplazamiento,
+  selección y filtro de década.
+- **Ruta sobre el título** en las páginas de artista y álbum («Todo › Fleetwood Mac»): cada tramo
+  lleva a ese nivel. Volver a pulsar la sección del lateral también lleva a su raíz.
+- **El lateral ya no se tapa**: Ajustes, Importar, Descargas y las demás páginas se abren a su
+  derecha, y su enlace de vuelta dice adónde lleva («← Inicio», «← Rumours»…) en vez de
+  «Biblioteca».
+- Al borrar la búsqueda se vuelve a donde se estaba antes de buscar. `Esc` cierra primero lo que
+  está encima (pantalla completa, Reproduciendo, la cola) y luego vuelve atrás desde un álbum, un
+  artista o una página.
+- Para mover canciones de una lista en la cuadrícula se usa `Alt+↑/↓`, como en la lista
+  (`Alt+←/→` es Atrás y Adelante).
+
+### Álbumes, artistas y listas
+- **Cabecera con portada**: la portada en grande (la del artista, en círculo; las listas y Me
+  gusta, con un mosaico de cuatro), el tipo y el año, el título, el artista como enlace y botones
+  para **reproducir**, en **aleatorio**, marcar **Me gusta** todo y «⋯» (añadir a la cola o a una
+  lista, descargar lo que falta, ir al artista; en una lista, renombrarla, exportarla o
+  eliminarla). Al bajar por la lista se recoge para dejar sitio y vuelve al subir del todo.
+- La lista ocupa **todo el ancho** (en un álbum quedaba media pantalla vacía).
+- **Al pasar el ratón por una canción**: ▶ en lugar del número para reproducirla, y a la derecha
+  ♡ para Me gusta y «⋯» con el resto de acciones (antes solo en el clic derecho).
+- **Página de artista**: primero **lo que más escuchas** suyo y debajo su discografía.
+- **Arrastrar y soltar**: canciones de cualquier lista o búsqueda sobre una lista del lateral
+  para añadirlas, y dentro de una lista para cambiar su orden (en la vista de lista).
+
+### Lateral y barra de arriba
+- **«＋ Añadir música»** reúne lo que antes eran iconos sueltos sin texto: buscar en YouTube,
+  importar desde un enlace y música por frase (`Ctrl+G`).
+- **Descargas con contador**: el icono enseña cuántas canciones quedan por bajar (gris si están
+  en pausa) y su ayuda lo dice con palabras.
+- **«Tus listas», «Géneros» y «YouTube» se pliegan** con un clic en su título (▾ / ▸) y se
+  recuerda al cerrar. Plegada, una sección deja a la vista solo lo que esté elegido.
+- **El tema pasa a Ajustes**, con una opción nueva, **«Como Windows»**: sigue al sistema y cambia
+  sola cuando cambia Windows. Quien había elegido claro u oscuro a propósito lo conserva.
+
+### Ajustes
+- **Interruptores** para lo que es sí / no (aleatorio, cola automática, letras, normalizar,
+  animaciones, iniciar con Windows…) y **todas las opciones a la vista** para lo demás: Tema
+  (Como Windows · Claro · Oscuro), Vista (Lista · Cuadrícula), Repetir (No · Lista · Canción) y
+  Transición (No · 2 s … 12 s). Antes eran botones que cambiaban de texto al pulsarlos.
+- **Índice a la izquierda** que salta a cada sección y marca en cuál estás; con la ventana
+  estrecha se oculta para dejar sitio.
+- Importar ya no repite «Pega un enlace de YouTube Music» cuatro veces: el título dice qué es,
+  debajo qué se puede traer y el campo dónde va el enlace.
+
+### Actualizaciones
+- **Aviso de versiones nuevas de Sound**: una vez al día se mira la lista pública de versiones en
+  GitHub (no se envía nada tuyo; se desactiva en Ajustes). Si hay una nueva, sale un aviso y el
+  engranaje se ilumina; en Ajustes → Actualizaciones se leen las novedades y «Actualizar ahora»
+  la descarga, comprueba que coincide con la publicada (SHA-256) y la instala: Sound se cierra
+  unos segundos y vuelve a abrirse solo, con la cola donde estaba y respetando «Iniciar con
+  Windows». Funciona a partir de esta versión (quien tenga la 1.3.0 la instala a mano una vez).
+
 ## 1.3.0 — 2026-11-14
 
 ### Arreglado

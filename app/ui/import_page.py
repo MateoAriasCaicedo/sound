@@ -1,7 +1,7 @@
 """Página «Importar de YouTube Music»: pega un enlace y encola lo que aún no tengas.
 
 Sustituye al cuadro de diálogo nativo por una página dentro de la ventana: comparte la paleta,
-la tipografía y los botones del resto de la aplicación, y se vuelve con «← Biblioteca» o Esc.
+la tipografía y los botones del resto de la aplicación, y se vuelve con «← …» (Atrás) o Esc.
 """
 import queue
 import threading
@@ -15,8 +15,8 @@ from .widgets import Field, PillButton
 
 POLL_MS = 100
 LIMIT = 200
-INFO = ("Álbum, playlist, artista o canción. Se encolan hasta 200 canciones; "
-        "las que ya tienes en la biblioteca no se vuelven a descargar.")
+INFO = ("Se encolan hasta 200 canciones; las que ya tienes en la biblioteca no se vuelven "
+        "a descargar.")
 EXAMPLES = ("Ejemplos:  music.youtube.com/playlist?list=…  ·  "
             "music.youtube.com/watch?v=…  ·  music.youtube.com/channel/…")
 
@@ -25,9 +25,9 @@ log = _log.get("ui")
 
 class ImportPage(Page):
     def __init__(self, app) -> None:
+        # el título dice qué es; el estado, qué se puede traer; el campo, dónde va el enlace
         super().__init__(app, "Importar de YouTube Music",
-                         hint="Álbum, playlist, artista o canción",
-                         status="Pega un enlace de YouTube Music")
+                         status="Un álbum, una playlist, un artista o una canción")
         self.events: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self._poll_job: str | None = None
@@ -38,16 +38,13 @@ class ImportPage(Page):
         b.rowconfigure(5, weight=1)
         self.bind("<Configure>", self._resized)
 
-        self.heading = tk.Label(b, anchor="w", text="Pega un enlace de YouTube Music",
-                                font=self.fonts["strong"])
-        self.heading.grid(row=0, column=0, sticky="ew", pady=(0, int(6 * self.k)))
 
         self.top = tk.Frame(b)
         self.top.grid(row=1, column=0, sticky="ew")
         self.top.columnconfigure(0, weight=1)
         self.var_url = tk.StringVar()
         self.url_field = Field(self.top, self.app.anim, self.k, (FONT_FAMILY, 11),
-                               self.var_url, hint="Pega un enlace de YouTube Music…", height=40)
+                               self.var_url, hint="Pega aquí el enlace…", height=40)
         self.url_field.grid(row=0, column=0, sticky="ew")
         self.url_field.entry.bind("<Return>", lambda e: self.start())
 
@@ -188,9 +185,8 @@ class ImportPage(Page):
         pal = self.app.pal
         for frame in (self.top, self.buttons):
             frame.configure(bg=pal["bg"])
-        for label in (self.heading, self.info, self.examples, self.status):
+        for label in (self.info, self.examples, self.status):
             label.configure(bg=pal["bg"])
-        self.heading.configure(fg=pal["fg"])
         self.info.configure(fg=pal["dim"])
         self.examples.configure(fg=pal["faint"])
         self.status.configure(fg=pal["danger" if self._status_error else "dim"])

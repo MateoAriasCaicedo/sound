@@ -114,10 +114,10 @@ def enable_dpi_awareness() -> None:
 def system_is_dark() -> bool:
     try:
         import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-        return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+        with winreg.OpenKey(  # se mira cada pocos segundos: la clave se cierra siempre
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
     except OSError:
         return False
 

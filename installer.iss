@@ -57,7 +57,23 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Abrir {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; Al actualizarse desde Sound (instalación silenciosa con /RELAUNCH) se vuelve a abrir solo.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: ShouldRelaunch
 
 [UninstallDelete]
 ; La biblioteca, el historial y las preferencias NO se borran al desinstalar.
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// Sound abre el instalador así para actualizarse: /SILENT ... /RELAUNCH (ver app/core/app_update.py)
+function ShouldRelaunch: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  if not WizardSilent then
+    Exit;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/RELAUNCH') = 0 then
+      Result := True;
+end;

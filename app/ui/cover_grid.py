@@ -859,6 +859,14 @@ class CoverGrid(tk.Canvas):
         self.yview_moveto(self.off / max(1, self.total))
         self._render_visible()
 
+    def scroll_fraction(self) -> float:
+        """Por dónde va el desplazamiento (0 arriba), para dejarlo igual al volver."""
+        return self.off / max(1, self.total)
+
+    def scroll_to_fraction(self, fraction: float) -> None:
+        self._apply_scroll(fraction * self.total)
+        self._goal = self.off
+
     def scrollbar(self, action: str, *args) -> None:
         """Interfaz de la barra de desplazamiento, como la de un Canvas."""
         try:

@@ -32,11 +32,16 @@ from ..core import playlists as playlists_store
 from ..core.filters import fold
 from . import home, prefs, session, window_state
 from .anim import Animator, ease_in_out
+from .app_updates import CHECK_DELAY_MS, AppUpdateMixin
+from .chrome import SYSTEM_POLL_MS, ChromeMixin
 from .cover_grid import CoverGrid, album_key, artist_key, group_albums
 from .downloads import DownloadsController
+from .drag import DragMixin
 from .events import AHEAD_RESULTS, EventLoopMixin
+from .hero import HeroMixin
 from .library_ui import LibraryMixin
 from .lyrics_view import LyricsView
+from .navigation import NavigationMixin, Place, section_key
 from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
 from .playqueue import PlayQueue
@@ -49,7 +54,6 @@ from .theme import (
     readable_on,
     seed_color,
     style_titlebar,
-    system_is_dark,
     vivid,
 )
 from .toast import Toast
@@ -101,12 +105,18 @@ def load_library() -> list[dict]:
 
 
 DOWNLOAD_LABEL = "↓ Descargar"  # columna de estado de un resultado de YouTube: se puede pulsar
+# al pasar el ratón por una canción: ▶ en vez del número y, a la derecha, Me gusta y «⋯»
+HOVER_PLAY = "▶"
+HOVER_LIKE, HOVER_LIKED, HOVER_MORE = "♡", "♥", "⋯"
+HOVER_GAP = "      "
+HOVER_LEAD = "    "  # aire tras la duración: el corazón no debe parecer parte de ella
 LYRICS_NOTICE = ("Las letras están desactivadas. Al activarlas, el título, el artista, el álbum y "
                  "la duración de cada canción se envían a LRCLIB, un servicio externo.")
 DUPES_CHECK_MS = 8000  # tras arrancar, se buscan canciones repetidas para ofrecer revisarlas
 
 
-class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
+class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMixin,
+          LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
         self.pq = PlayQueue(self._is_remote, lambda: self.online)
@@ -206,7 +216,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         cookies_store.configure(self.cookies)
         self._cookies_dialog_shown = False
         self._crash_shown = False
-        self.dark = self.prefs.get("dark", system_is_dark())
+        self._init_chrome()  # tema (Como Windows, claro u oscuro) y barra de arriba (chrome.py)
+        # secciones del lateral plegadas: «lists», «genres», «yt»
+        self._side_folded = {str(n) for n in self.prefs.get("side_folded") or []}
         self._last_volume = float(self.prefs.get("vol", 80))
         self.auto_update = bool(self.prefs.get("auto_update", True))
         try:
@@ -214,6 +226,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         except (TypeError, ValueError):
             self._ytdlp_checked_at = 0.0
         self._auto_update_running = False
+        self._init_app_updates()  # versiones nuevas de Sound (app_updates.py)
         self.start_with_windows = startup.is_enabled()
         self.pq.shuffle = bool(self.prefs.get("shuffle", False))
         self.pq.repeat = int(self.prefs.get("repeat", 0))
@@ -260,6 +273,10 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._listen_counted = True
         self._tick_at = time.monotonic()
 
+        self._init_navigation()  # Atrás y Adelante (navigation.py)
+        self._init_hero()        # cabecera de portada de álbumes, artistas y listas (hero.py)
+        self._init_drag()        # arrastrar canciones a una lista o dentro de ella (drag.py)
+        self._loose_rows = 0     # filas del principio que la cuadrícula no junta por álbum
         self.waves = waveform.Analyzer(lambda vid, levels: self.q.put(("wave", vid, levels)))
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
@@ -267,6 +284,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.apply_theme()
         self.refresh_library()
         self._restore_session()
+        self._visited()  # el primer sitio del historial: Inicio
         self.waves.sweep((t["video_id"], t["path"]) for t in self.library)
         threading.Thread(target=self._fix_fragmented, daemon=True, name="mp4fix").start()
         self._load_yt_genres()
@@ -289,6 +307,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.bind("<MouseWheel>", self._wheel_anywhere, add="+")
         bind_touchpad(self, self._touchpad_anywhere, add=True)
         self.bind("<Escape>", self._escape)
+        # Atrás y Adelante: Alt+← / Alt+→ y los botones laterales del ratón (4 y 5 en Windows)
+        self.bind("<Alt-Left>", self.go_back)
+        self.bind("<Alt-Right>", self.go_forward)
+        self.bind("<Button-4>", lambda e: self._mouse_side(False))
+        self.bind("<Button-5>", lambda e: self._mouse_side(True))
         self.play_pool.submit(self._warm_up)
         threading.Thread(target=self._net_loop, daemon=True).start()
         self.after(FADE_TICK_MS, self._fade_tick)
@@ -299,6 +322,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.after(1500, self._setup_taskbar)  # cuando el icono de la barra de tareas ya existe
         self.after(600, self._setup_system_media)
         self.after(AUTO_UPDATE_DELAY_MS, self._maybe_auto_update)
+        self.after(CHECK_DELAY_MS, self._maybe_check_app_update)
+        self.after(SYSTEM_POLL_MS, self._follow_system_theme)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.anim.tween("window", 260, lambda p: self.attributes("-alpha", p),
                         done=lambda: self.attributes("-alpha", 1.0))
@@ -349,6 +374,17 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.mark.bind("<Button-1>", self.go_home)
         self.mark.bind("<Enter>", self._mark_enter)
         self.mark.bind("<Leave>", self._mark_leave)
+        # Atrás y Adelante, justo antes del buscador (encima del borde del lateral)
+        self.nav_box = tk.Frame(top)
+        self.nav_box.grid(row=0, column=0, sticky="e", padx=(0, int(10 * k)),
+                          pady=(int(6 * k), 0))
+        self.btn_nav_back = IconButton(self.nav_box, self.anim, k, "chevron_left", self.go_back,
+                                       tip=lambda: self._nav_tip(False), size=32, glyph=18)
+        self.btn_nav_fwd = IconButton(self.nav_box, self.anim, k, "chevron_right",
+                                      self.go_forward, tip=lambda: self._nav_tip(True),
+                                      size=32, glyph=18)
+        self.btn_nav_back.pack(side="left")
+        self.btn_nav_fwd.pack(side="left")
         self.query = tk.StringVar()
         self.search_box = SearchBox(top, self.anim, k, f["body"], self.query,
                                     "Buscar canciones, artistas o álbumes…")
@@ -360,29 +396,22 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.btn_dl.grid(row=0, column=4)
         self.btn_dl.set_visible(False)
         # «Descargas» (la cola de descargas), distinta de la cola de reproducción (btn_queue)
-        self.btn_downloads = IconButton(
-            top, self.anim, k, "downloads", self.open_queue,
-            tip=lambda: ("Descargas en pausa" if self.dl_paused else
-                         "Descargas limitadas: poco espacio" if self.disk_level != "ok" else
-                         "Descargas"))
-        self.btn_downloads.grid(row=0, column=7, padx=(int(2 * k), 0))
-        self.btn_import = IconButton(top, self.anim, k, "link", self.open_import,
-                                     tip="Importar álbum, playlist o artista (URL)")
-        self.btn_import.grid(row=0, column=5, padx=(int(6 * k), 0))
-        self.btn_prompt = IconButton(top, self.anim, k, "note", self.open_prompt,
-                                     tip="Música por frase (Ctrl+G)")
-        self.btn_prompt.grid(row=0, column=6, padx=(int(2 * k), 0))
+        # «＋ Añadir música» reúne buscar en YouTube, importar un enlace y música por frase
+        self._build_add_button(top, 5)
+        # «Descargas» (la cola de descargas), distinta de la cola de reproducción (btn_queue)
+        self.btn_downloads = IconButton(top, self.anim, k, "downloads", self.open_queue,
+                                        tip=lambda: self._downloads_tip())
+        self.btn_downloads.grid(row=0, column=7, padx=(int(2 * k), 0), pady=(int(6 * k), 0))
         self.btn_settings = IconButton(top, self.anim, k, "settings", self.open_settings,
-                                       tip="Ajustes y atajos (Ctrl+,)")
-        self.btn_settings.grid(row=0, column=10, padx=(int(2 * k), int(14 * k)))
-        self.btn_theme = IconButton(top, self.anim, k, "theme", self.toggle_theme,
-                                    tip="Tema claro u oscuro")
-        self.btn_theme.grid(row=0, column=9, padx=(int(2 * k), 0))
+                                       tip=lambda: self._settings_tip())
+        self.btn_settings.grid(row=0, column=10, padx=(int(2 * k), int(14 * k)),
+                               pady=(int(6 * k), 0))
 
         # título de la vista y línea de estado, sobre un degradado teñido por la canción
         self.header = Header(self, self.anim, k, f, list_x)
         self.header.grid(row=1, column=0, sticky="ew")
         self.status = StatusLine(self.header)
+        self._build_hero_bar()
 
         content = tk.Frame(self)
         content.grid(row=2, column=0, sticky="nsew")
@@ -397,7 +426,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         side.columnconfigure(0, weight=1)
         self.side = side
         self.genres = RowList(side, self.anim, k, f, on_select=self._pick_genre,
-                              on_context=self._side_context)
+                              on_context=self._side_context, reselect=True,
+                              on_header=self._toggle_side_section)
         self.genres.configure(width=int((SIDE_W - 14) * k))
         self.genres.grid(row=0, column=0, sticky="nsew")
         self.sb_genres = ttk.Scrollbar(side, orient="vertical",
@@ -420,11 +450,6 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.list_tools.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, int(4 * k)))
         self.list_tools.columnconfigure(1, weight=1)
         pad_y = (int(2 * k), int(2 * k))
-        # en una página de álbum o artista: volver (también con Esc)
-        self.btn_back = IconButton(self.list_tools, self.anim, k, "back", self.close_view,
-                                   tip="Volver (Esc)", size=32, glyph=18)
-        self.btn_back.grid(row=0, column=0, padx=(int(2 * k), int(4 * k)), pady=pad_y)
-        self.btn_back.grid_remove()
         self.chips = ChipBar(self.list_tools, self.anim, k, f["small"], self._pick_decade)
         self.chips.grid(row=0, column=1, sticky="w", padx=(int(6 * k), 0))
         self.btn_sort = TextButton(self.list_tools, self.anim, "", f["small"], self._sort_menu)
@@ -456,9 +481,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.tree.bind("<Delete>", lambda e: self.delete_selected())
         self.tree.bind("<Alt-Up>", lambda e: self._move_key(-1))
         self.tree.bind("<Alt-Down>", lambda e: self._move_key(1))
+        self.tree.bind("<Configure>", self._fit_columns, add="+")
         self.tree.bind("<Motion>", self._row_hover)
         self.tree.bind("<Leave>", self._tree_leave)
         self.tree.bind("<ButtonRelease-1>", self._tree_click)
+        self._bind_drag()
         self.tree_tip = PointerTip(self.tree, self.anim, lambda: (
             blend(self.pal["bg"], self.pal["fg"], 0.14), self.pal["fg"]))
         self.grid = CoverGrid(mid, self.anim, k, f, on_select=self._grid_selected,
@@ -469,8 +496,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.grid.grid(row=1, column=0, sticky="nsew")
         self.grid.grid_remove()
         self.grid.bind("<Delete>", lambda e: self.delete_selected())
-        for seq, delta in (("<Alt-Left>", -1), ("<Alt-Up>", -1), ("<Alt-Right>", 1),
-                           ("<Alt-Down>", 1)):
+        # Alt+←/→ son Atrás y Adelante; para mover canciones de una lista, Alt+↑/↓
+        for seq, delta in (("<Alt-Up>", -1), ("<Alt-Down>", 1)):
             self.grid.bind(seq, lambda e, d=delta: self._move_key(d))
         self.empty = tk.Label(mid, font=f["body"])
 
@@ -590,8 +617,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._bar_full: int | None = None  # ancho que pide la derecha del reproductor completa
         self._bar_compact = False
         band.bind("<Configure>", lambda e: self.after_idle(self._fit_bar))
-        self.top_icons = (self.btn_import, self.btn_prompt, self.btn_downloads,
-                          self.btn_theme, self.btn_settings)
+        self.top_icons = (self.btn_downloads, self.btn_settings, self.btn_nav_back,
+                          self.btn_nav_fwd)
         self.bar_icons = (self.btn_shuffle, self.btn_prev, self.btn_next, self.btn_repeat,
                           self.vol_icon, self.btn_queue, self.btn_xfade, self.btn_auto,
                           self.btn_mini, self.btn_stage)
@@ -680,7 +707,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.grid.set_context(liked=self.liked, damaged=self.damaged, states=self.dl.state,
                               view_kind=self.view_kind)
         if self._group_albums():
-            cards, members = group_albums(self.rows)
+            # lo de arriba (lo que más escuchas de un artista) va canción a canción
+            loose = self._loose_rows if self.sections else 0
+            cards, members = group_albums(self.rows[loose:])
+            cards = list(self.rows[:loose]) + cards
+            members = [(i,) for i in range(loose)] + [
+                tuple(i + loose for i in group) for group in members]
         else:
             cards, members = self.rows, [(i,) for i in range(len(self.rows))]
         # las secciones van por filas de la tabla; la cuadrícula las quiere por tarjetas
@@ -713,6 +745,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def _grid_scrolled(self, first: str, last: str) -> None:
         """La barra de la cuadrícula solo aparece si hay algo que desplazar."""
         self.sb.set(first, last)
+        self._hero_scrolled(float(first))
         if float(first) <= 0 and float(last) >= 1:
             self.sb.grid_remove()
         else:
@@ -785,45 +818,60 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.close_now_view()  # desde la vista en grande: se va a la página pedida
         if top is not None and (top["kind"], top["key"]) == (view["kind"], view["key"]):
             return
-        if self.active_page is not None:
-            self.close_page()
-        # al volver se selecciona lo que estaba seleccionado (la tarjeta del álbum, p. ej.)
-        view["return"] = back_to or [t["video_id"] for t in self._selected()]
-        self.views.append(view)
-        self.tree.selection_remove(*self.tree.selection())
-        self._sync_toolbar()
-        self._set_view(self._display_mode())
-        if self.query.get():
-            self.query.set("")  # una página no se filtra por la búsqueda (y _on_query refresca)
-        else:
-            self.refresh_view()
-        self._fade_rows()
-        (self.grid if self.view_mode == "grid" else self.tree).focus_set()
-        if self.view_mode == "list" and self.rows:
-            self.tree.focus("0")
-        if view["kind"] == "album":
-            self._want_track_numbers(view)
-
-    def close_view(self, refresh: bool = True) -> None:
-        """Vuelve un nivel atrás (del álbum al artista, del artista a la biblioteca)."""
-        if not self.views:
-            return
-        view = self.views.pop()
-        self._sync_toolbar()
-        self._set_view(self._display_mode())
-        if not refresh:  # quien llama refresca la vista enseguida
-            return
-        self.refresh_view()
-        self._fade_rows()
-        keep = [self.vid_iid[vid] for vid in view.get("return", []) if vid in self.vid_iid]
-        if keep:
-            self.tree.selection_set(keep)
-            self._on_select()
-            if self.view_mode == "grid":
-                self.grid.see_row(int(keep[0]))
-                self.grid.focus_set()
+        with self._navigating():
+            self._hide_page()
+            # al volver se selecciona lo que estaba seleccionado (la tarjeta del álbum, p. ej.)
+            view["return"] = back_to or [t["video_id"] for t in self._selected()]
+            self.views.append(view)
+            self.tree.selection_remove(*self.tree.selection())
+            self._sync_toolbar()
+            self._set_view(self._display_mode())
+            if self.query.get():
+                self.query.set("")  # una página no se filtra por la búsqueda (y _on_query refresca)
             else:
-                self.tree.see(keep[0])
+                self.refresh_view()
+            self._fade_rows()
+            (self.grid if self.view_mode == "grid" else self.tree).focus_set()
+            if self.view_mode == "list" and self.rows:
+                self.tree.focus("0")
+            if view["kind"] == "album":
+                self._want_track_numbers(view)
+
+    def close_view(self) -> None:
+        """Sube un nivel (del álbum al artista, del artista a la biblioteca)."""
+        self._go_up(len(self.views) - 1)
+
+    def _go_up(self, level: int) -> None:
+        """Deja abiertas solo las `level` primeras páginas: un tramo de la ruta de la cabecera."""
+        if not 0 <= level < len(self.views):
+            return
+        with self._navigating():
+            self.close_now_view()
+            self._hide_page()
+            view = self.views[level]  # al cerrarla vuelve lo que estaba elegido antes de abrirla
+            del self.views[level:]
+            self._sync_toolbar()
+            self._set_view(self._display_mode())
+            self.refresh_view()
+            self._fade_rows()
+            keep = [self.vid_iid[vid] for vid in view.get("return", []) if vid in self.vid_iid]
+            if keep:
+                self.tree.selection_set(keep)
+                self._on_select()
+                if self.view_mode == "grid":
+                    self.grid.see_row(int(keep[0]))
+                    self.grid.focus_set()
+                else:
+                    self.tree.see(keep[0])
+
+    def _trail(self) -> list[tuple[str, object]]:
+        """La ruta sobre el título de una página de álbum o artista; cada tramo lleva a su nivel."""
+        if not self.views or self.query.get().strip():
+            return []
+        parts = [(self._section_label(section_key(self.sel_keys)), lambda: self._go_up(0))]
+        for level, view in enumerate(self.views[:-1], start=1):
+            parts.append((view["title"], lambda level=level: self._go_up(level)))
+        return parts
 
     def close_views(self) -> None:
         """Cierra todas las páginas abiertas; quien llama refresca la vista."""
@@ -1180,12 +1228,14 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                                 faint=p["faint"], line=blend(p["bg"], p["fg"], 0.18),
                                 accent=accent)
         self.btn_dl.restyle(top, p["fg"], p["dim"])
+        self.nav_box.configure(bg=top)
         for b in self.top_icons:
             b.restyle(top, p["fg"], p["dim"], accent)
+        self.btn_add.restyle(bg=top, fg=p["fg"], dim=p["dim"], faint=p["faint"], accent=accent,
+                             on_accent=p["accent_fg"], danger=p["danger"])
         self.list_tools.configure(bg=p["bg"])
         self.btn_view.restyle(p["bg"], p["fg"], p["dim"], accent)
         self.btn_more.restyle(p["bg"], p["fg"], p["dim"], accent)
-        self.btn_back.restyle(p["bg"], p["fg"], p["dim"], accent)
         self.header.restyle(top, p["bg"], p["fg"], p["dim"])
         self.scale.restyle(p["bg"], blend(p["bg"], p["fg"], 0.15), blend(p["bg"], p["fg"], 0.36),
                            accent, p["fg"])
@@ -1229,12 +1279,6 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                         lambda q: self._paint({key: blend(old[key], new[key], q) for key in new}),
                         ease=ease_in_out, done=lambda: self._ambient_settled(new))
 
-    def toggle_theme(self) -> None:
-        self.dark = not self.dark
-        self.apply_theme()
-        self.anim.tween("window", 200, lambda q: self.attributes("-alpha", 0.82 + 0.18 * q))
-        self.save_prefs()
-
     def toggle_reduce_motion(self) -> None:
         """Anima o no la ventana; se guarda y se aplica al momento."""
         self.anim.set_reduced(not self.anim.reduced)
@@ -1261,52 +1305,80 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         except Exception as exc:  # noqa: BLE001 - sin listas, el resto del lateral sigue
             _log.failure(log, "no se pudieron leer las listas", exc)
             self.playlists = []
-        items.append(("hdr", None, "Tus listas"))
+        # «Tus listas», «Géneros» y «YouTube» se pliegan con un clic en su título (se recuerda);
+        # plegada, una sección solo deja a la vista lo que esté elegido
+        folded = self._side_folded
+        items.append(("hdr", "lists", "Tus listas"))
         rights.append("")
         for pl in self.playlists:
-            items.append(("pl", pl["id"], pl["name"]))
-            rights.append(str(pl["count"]) if pl["count"] else "")
-        items.append(("newpl", None, "＋ Nueva lista"))
-        rights.append("")
+            if "lists" not in folded or ("pl", pl["id"]) in self.sel_keys:
+                items.append(("pl", pl["id"], pl["name"]))
+                rights.append(str(pl["count"]) if pl["count"] else "")
+        if "lists" not in folded:
+            items.append(("newpl", None, "＋ Nueva lista"))
+            rights.append("")
         if counts:
-            items.append(("hdr", None, "Géneros"))
+            items.append(("hdr", "genres", "Géneros"))
             rights.append("")
         # los géneros de una sola canción se pliegan: la lista se lee de un vistazo
         chosen = {n for k, n in self.sel_keys if k == "lib"}
         few = [g for g, n in counts.items() if n == 1 and g not in chosen]
-        folded = len(few) >= 3 and not self._genres_open
+        few_folded = len(few) >= 3 and not self._genres_open
         for g, n in sorted(counts.items(), key=lambda x: fold(x[0])):
-            if folded and g in few:
+            if few_folded and g in few:
+                continue
+            if "genres" in folded and g not in chosen:
                 continue
             items.append(("lib", g, g))
             rights.append(str(n))
-        if len(few) >= 3:
+        if len(few) >= 3 and "genres" not in folded:
             items.append(("more", None, "Ver menos" if self._genres_open
                           else f"{len(few)} géneros más…"))
             rights.append("")
         if self.yt_genres:
-            items.append(("hdr", None, "YouTube"))
+            items.append(("hdr", "yt", "YouTube"))
             rights.append("")
             for g in self.yt_genres:
-                items.append(("yt", g, g))
-                rights.append("")
+                if "yt" not in folded or ("yt", g) in self.sel_keys:
+                    items.append(("yt", g, g))
+                    rights.append("")
         else:
             items.append(("hdr", None, "YouTube · sin conexión" if self.yt_failed
                           else "YouTube · cargando…"))
             rights.append("")
         self.side_items = items
         self.genres.sel.clear()
-        self.genres.set_items([dict(text=label, right=right, hdr=k == "hdr")
-                               for (k, _n, label), right in zip(items, rights)])
-        for i, (k, n, _l) in enumerate(items):
+        rows = []
+        for (k, n, label), right in zip(items, rights):
+            row = dict(text=label, right=right, hdr=k == "hdr")
+            if k == "hdr" and n is not None:  # se pliega: ▸ plegada, ▾ abierta
+                row["fold"] = n in folded
+                row["right"] = "▸" if n in folded else "▾"
+            rows.append(row)
+        self.genres.set_items(rows)
+        self._mark_sidebar()
+
+    def _toggle_side_section(self, index: int) -> None:
+        """Pliega o despliega «Tus listas», «Géneros» o «YouTube» (se recuerda al cerrar)."""
+        name = self.side_items[index][1] if index < len(self.side_items) else None
+        if name is None:
+            return
+        self._side_folded ^= {name}
+        self._build_sidebar()
+        self.save_prefs()
+
+    def _mark_sidebar(self) -> None:
+        """El lateral marca la sección que se ve; con una página abierta (Ajustes…), ninguna."""
+        self.genres.selection_clear()
+        if self.active_page is not None:
+            return
+        for i, (k, n, _l) in enumerate(self.side_items):
             if (k, n) in self.sel_keys:
                 self.genres.selection_set(i)
         if not self.genres.curselection():
             self.genres.selection_set(0)
 
     def _pick_genre(self, _e=None) -> None:
-        if self.active_page is not None:
-            self.close_page()
         sel = [self.side_items[i] for i in self.genres.curselection()]
         sel = [s for s in sel if s[0] != "hdr"]
         if any(s[0] == "more" for s in sel):  # desplegar o plegar géneros; la vista no cambia
@@ -1318,9 +1390,25 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             return
         if not sel:
             return
+        if ({(k, n) for k, n, _l in sel} == self.sel_keys and not self.views
+                and self.active_page is None and not self.query.get().strip()):
+            return  # ya se está ahí
+        with self._navigating():
+            self.close_now_view()
+            self._hide_page()
+            had_query = bool(self.query.get())
+            self._apply_section(sel)
+            self._mark_sidebar()  # al salir de una página se marcaba aún la sección de antes
+            if had_query:  # al explorar se deja la búsqueda de texto (y _on_query refresca)
+                self.query.set("")
+            else:
+                self.refresh_view()
+            self._fade_rows()
+
+    def _apply_section(self, sel: list[tuple]) -> None:
+        """Pone la sección del lateral elegida (Inicio, Todo, una lista, géneros…) sin pintar."""
         self.close_views()
         self.decade = None  # cada sección empieza sin filtro de década
-        had_query = bool(self.query.get())
         special = next((s for s in sel if s[0] in ("home", "liked", "recent", "top", "pl")),
                        None)
         if special:
@@ -1349,11 +1437,6 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                 self._debounce = self.after(500, self._search_genres)
             elif self.remote_src == "genres":
                 self.remote, self.remote_src = [], None
-        if had_query:  # al explorar se deja la búsqueda de texto (y _on_query refresca)
-            self.query.set("")
-        else:
-            self.refresh_view()
-        self._fade_rows()
 
     def go_home(self, _e=None) -> str:
         """Vuelve a la pantalla principal: cierra páginas, cola y vista en grande, y abre «Inicio»."""
@@ -1376,8 +1459,14 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def _on_query(self) -> None:
         q = self.query.get().strip()
+        tracking = not self._nav_busy  # al volver a un sitio guardado no se apunta nada
+        was = self._nav_searching
+        self._nav_searching = bool(q)
+        if tracking and q and not was:
+            self._note_here(force=True)  # la lista aún enseña el sitio que se deja
         if q:
-            self.close_views()  # buscar sale de la página de álbum o artista
+            self.close_views()  # buscar sale de la página de álbum o artista…
+            self._hide_page()   # …y de Ajustes, Importar o Descargas
         if q and self.view_kind in ("home", "liked", "recent", "top", "playlist"):
             # buscar desde una vista especial busca en toda la biblioteca
             self.view_kind = "all"
@@ -1388,16 +1477,20 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.search_id += 1  # lo que esté en vuelo ya no corresponde a lo que se está escribiendo
         self.searching = len(q) >= SEARCH_MIN_CHARS
         self._show_pre_results(q)
-        self.refresh_view()
         if self._qdebounce:
             self.after_cancel(self._qdebounce)
             self._qdebounce = None
+        if tracking and was and not q and self._leave_search():
+            return  # al borrar la búsqueda se vuelve a donde se estaba antes de buscar
+        self.refresh_view()
         if len(q) >= SEARCH_MIN_CHARS:  # búsqueda automática en YT Music al dejar de escribir
             if len(q) == SEARCH_MIN_CHARS:
                 # primera pista ya, mientras se sigue escribiendo: el resto se completa después
                 self.search("songs", auto=True)
             self._qdebounce = self.after(
                 SEARCH_DEBOUNCE_MS, lambda: self.search("songs", auto=True))
+        if tracking:
+            self._visited()
 
     def _show_pre_results(self, q: str) -> None:
         """Pinta al instante resultados ya vistos para esta búsqueda o para un prefijo suyo.
@@ -1482,8 +1575,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
         top = self.sub_view
         sections = None
+        self._loose_rows = 0
         if top is not None:
             local, remote = self._sub_view_rows(top), []
+            if top["kind"] == "artist" and not q:
+                local, sections = self._artist_rows(local)
         elif self.view_kind == "home" and not q:
             (local, sections), remote = self._home_rows(), []
         elif self.view_kind == "playlist":
@@ -1516,6 +1612,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._fill(local, remote, sections)
         if self.active_page is not None:
             return  # la cabecera pertenece a la página abierta
+        self.header.set_trail(self._trail())
+        self._update_hero(self.rows)
         self.header.set_title(self._view_title(), animate=not q)
         if top is not None:
             self.status.configure(text=self._sub_view_status(top, local))
@@ -1549,12 +1647,29 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                 and self.view_mode == "grid" and max(4, cols) != self._home_per):
             self.refresh_view()
 
+    def _artist_rows(self, rows: list[dict]) -> tuple[list[dict], list | None]:
+        """Página de artista: primero lo que más escuchas suyo (hasta cinco) y luego el resto,
+        con sus álbumes juntos. Si casi no hay escuchas, todo seguido, sin secciones."""
+        try:
+            counts = history.play_counts()
+        except Exception as exc:  # noqa: BLE001 - sin historial, la página de siempre
+            _log.failure(log, "no se pudo leer el historial para la página del artista", exc)
+            return rows, None
+        played = sorted((t for t in rows if counts.get(t["video_id"])),
+                        key=lambda t: -counts[t["video_id"]])[:5]
+        if not played or len(rows) - len(played) < 2:
+            return rows, None
+        ids = {t["video_id"] for t in played}
+        self._loose_rows = len(played)
+        return played + [t for t in rows if t["video_id"] not in ids], [
+            (0, "Lo que más escuchas"), (len(played), "Discografía")]
+
     def _sub_view_status(self, view: dict, rows: list[dict]) -> str:
         n = len(rows)
         songs = f"{n} {'canción' if n == 1 else 'canciones'}"
         if view["kind"] == "album":
             minutes = round(sum(t.get("duration") or 0 for t in rows) / 60)
-            parts = [view["artist"], songs] + ([f"{minutes} min"] if minutes else [])
+            parts = [songs] + ([f"{minutes} min"] if minutes else [])
         else:
             albums = len({album_key(t) for t in rows if album_key(t)})
             parts = [songs] + ([f"{albums} {'álbum' if albums == 1 else 'álbumes'}"] if albums else [])
@@ -1701,10 +1816,51 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         iid = self.tree.identify_row(e.y)
         self._set_hover_row(iid if iid.isdigit() else None)
         self._tree_tip(e, iid)
-        on_download = (iid.isdigit() and self.tree.identify_region(e.x, e.y) == "cell"
-                       and self._tree_column(e.x) == "state"
-                       and self.tree.set(iid, "state") == DOWNLOAD_LABEL)
-        self.tree.configure(cursor="hand2" if on_download else "")
+        self.tree.configure(cursor="hand2" if self._row_action(e) else "")
+
+    def _row_action(self, e) -> str | None:
+        """Lo que haría un clic aquí: play (▶), like (♡), more (⋯), download o nada."""
+        iid = self.tree.identify_row(e.y)
+        if not iid.isdigit() or iid != self._hover_row:
+            return None
+        column = self._tree_column(e.x)
+        if column == "#0":
+            return "play" if self.tree.item(iid, "text") == HOVER_PLAY else None
+        if column != "state" or self.tree.identify_region(e.x, e.y) != "cell":
+            return None
+        value = self.tree.set(iid, "state")
+        if value == DOWNLOAD_LABEL:
+            return "download"
+        if not value.startswith((HOVER_LEAD + HOVER_LIKE, HOVER_LEAD + HOVER_LIKED)):
+            return None
+        box = self.tree.bbox(iid, "state")
+        split = (box[0] + self.fonts["body"].measure(HOVER_LEAD + HOVER_LIKE + HOVER_GAP[:3])
+                 + int(6 * self.k) if box else e.x + 1)
+        return "like" if e.x < split else "more"
+
+    def _row_number(self, t: dict) -> str:
+        album = self.sub_view is not None and self.sub_view["kind"] == "album"
+        return str(t.get("track_no") or "") if album else ""
+
+    def _hover_actions(self, iid: str, on: bool) -> None:
+        """▶ en lugar del número y, en la columna de estado, Me gusta y «⋯» (si está libre:
+        una descarga en curso o «↓ Descargar» se quedan como están)."""
+        i = int(iid)
+        if i >= len(self.rows):
+            return
+        t = self.rows[i]
+        state = self._row_state(t)
+        free = not state or state.startswith("×")
+        if on:
+            if t["video_id"] != self.playing_vid:
+                self.tree.item(iid, text=HOVER_PLAY)
+            if free:
+                heart = HOVER_LIKED if t["video_id"] in self.liked else HOVER_LIKE
+                self.tree.set(iid, "state", HOVER_LEAD + heart + HOVER_GAP + HOVER_MORE)
+        else:
+            self.tree.item(iid, text=self._row_number(t))
+            if free:
+                self.tree.set(iid, "state", state)
 
     def _tree_tip(self, e, iid: str) -> None:
         """Texto completo de la celda bajo el puntero, si la columna lo recorta."""
@@ -1732,13 +1888,24 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             return ""
 
     def _tree_click(self, e) -> str | None:
-        """Clic en «↓ Descargar» de un resultado de YouTube: lo descarga sin más."""
+        """Clic en lo que aparece al pasar el ratón: ▶ reproduce, ♡ marca Me gusta, «⋯» abre el
+        menú y «↓ Descargar» descarga un resultado de YouTube."""
+        if self.dragging:  # soltar lo arrastrado no es pulsar lo que haya debajo
+            return None
+        action = self._row_action(e)
+        if action is None:
+            return None
         iid = self.tree.identify_row(e.y)
-        if (iid.isdigit() and self._tree_column(e.x) == "state"
-                and self.tree.set(iid, "state") == DOWNLOAD_LABEL):
-            self.download_tracks([self.rows[int(iid)]])
-            return "break"
-        return None
+        t = self.rows[int(iid)]
+        if action == "play":
+            self.play_index(int(iid))
+        elif action == "like":
+            self.toggle_like([t])
+        elif action == "more":
+            self._context_at(iid, e.x_root, e.y_root)
+        elif action == "download":
+            self.download_tracks([t])
+        return "break"
 
     def _set_hover_row(self, iid: str | None) -> None:
         if iid == self._hover_row:
@@ -1747,12 +1914,14 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             if row and self.tree.exists(row):
                 tags = [x for x in self.tree.item(row, "tags") if x != "hover"]
                 self.tree.item(row, tags=[*tags, "hover"] if change else tags)
+                self._hover_actions(row, change)
         self._hover_row = iid
         self._place_eq()
 
     def _tree_scrolled(self, first: str, last: str) -> None:
         """La barra de desplazamiento solo aparece si hay algo que desplazar."""
         self.sb.set(first, last)
+        self._hero_scrolled(float(first))
         self._place_eq()
         if float(first) <= 0 and float(last) >= 1:
             self.sb.grid_remove()
@@ -1833,6 +2002,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             drop = {"artist", "album"} if top["kind"] == "album" else {"artist"}
             shown = [c for c in shown if c not in drop]
         self.tree.configure(displaycolumns=shown)
+        self._shown_cols = shown
+        self._fit_columns()
         self.tree.heading("#0", text="#" if album else "")
         if self.view_mode == "grid":
             self._sync_grid()
@@ -1840,6 +2011,22 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._sync_toolbar()
         self._update_empty()
         self._place_eq()
+
+    def _fit_columns(self, _e=None) -> None:
+        """Las columnas que se ven llenan el ancho: al ocultar artista y álbum (en un álbum)
+        quedaba un hueco a la derecha. Título, artista y álbum se reparten lo que sobra."""
+        width = self.tree.winfo_width()
+        shown = getattr(self, "_shown_cols", [c[0] for c in COLS])
+        if width <= 1:
+            return
+        k = self.k
+        base = {c: int(w * k) for c, _t, w in COLS}
+        flex = [c for c in shown if c in ("title", "artist", "album")]
+        fixed = int(30 * k) + sum(base[c] for c in shown if c not in flex)
+        room = max(len(flex) * int(90 * k), width - fixed - 4)
+        total = sum(base[c] for c in flex) or 1
+        for c in flex:
+            self.tree.column(c, width=max(int(90 * k), room * base[c] // total))
 
     def _update_empty(self) -> None:
         if self.rows:
@@ -1913,10 +2100,9 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._fade_rows()
 
     def _sync_toolbar(self) -> None:
-        """Volver solo en una página; en un álbum no hay orden ni cambio de vista (es una lista)."""
+        """En un álbum no hay orden ni cambio de vista (es una lista)."""
         top = self.sub_view
         album = top is not None and top["kind"] == "album"
-        (self.btn_back.grid if top is not None else self.btn_back.grid_remove)()
         (self.btn_view.grid_remove if album else self.btn_view.grid)()
         # en «Inicio» cada estantería trae su propio orden
         self.btn_sort.set_visible(not album and self.raw[2] is None)
@@ -2417,6 +2603,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def import_loaded(self, label: str, tracks: list[dict]) -> None:
         """Muestra lo importado en la biblioteca y encola solo las canciones nuevas."""
+        with self._navigating():
+            self._hide_page()
+            self.close_views()
+            self._show_imported(label, tracks)
+
+    def _show_imported(self, label: str, tracks: list[dict]) -> None:
         new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
         self.view_kind = "all"
         self.genre_filter = set()
@@ -2460,11 +2652,16 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         return page
 
     def show_page(self, name: str) -> None:
-        """Trae una página al frente dentro de la ventana; nunca abre otra ventana."""
+        """Trae una página al frente, a la derecha del lateral; nunca abre otra ventana."""
         page = self._ensure_page(name)
         if self.active_page is page:
             page.activate()
             return
+        with self._navigating():
+            self._show_page_now(name)
+
+    def _show_page_now(self, name: str) -> None:
+        page = self._ensure_page(name)
         if self._qdebounce:  # una búsqueda a medio escribir no debe cerrar la página sola
             self.after_cancel(self._qdebounce)
             self._qdebounce = None
@@ -2476,14 +2673,27 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             self.active_page.place_forget()  # si no, al cerrar la nueva reaparecería la anterior
         self.active_page = page
         page.restyle()
-        page.place(relx=0, rely=0, relwidth=1, relheight=1)
+        # ocupa la columna de la lista: el lateral sigue a la vista para ir a cualquier sección
+        page.place(in_=self.mid, relx=0, rely=0, relwidth=1, relheight=1)
         page.lift()
+        self.header.set_trail([])
+        self.header.set_hero(None)
         self.header.set_title(page.page_title)
         page.activate()
         self._refresh_nav()
+        self._mark_sidebar()
 
     def close_page(self, *_args) -> None:
-        """Vuelve a la biblioteca desde cualquier página integrada."""
+        """Quita la página y enseña lo que había debajo."""
+        if self.active_page is None:
+            return
+        with self._navigating():
+            self._hide_page()
+            self.refresh_view()
+            (self.grid if self.view_mode == "grid" else self.tree).focus_set()
+
+    def _hide_page(self) -> None:
+        """Quita la página abierta sin repintar la lista (quien llama la repinta)."""
         page = self.active_page
         if page is None:
             return
@@ -2491,30 +2701,105 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         page.place_forget()
         self.active_page = None
         self._refresh_nav()
-        self.refresh_view()
+        self._mark_sidebar()
+
+    def _page_back(self) -> None:
+        """El enlace «← …» de una página: vuelve a donde se estaba."""
+        if self.nav.can_back:
+            self.go_back()
+        else:
+            self.close_page()
+
+    # ---------- historial (ver navigation.py) ----------
+    def _restore_place(self, place: Place) -> None:
+        """Deja la ventana en un sitio guardado del historial."""
+        self.close_now_view()
+        self._hide_page()
+        keys = set(place.section)
+        sel = [item for item in self.side_items if (item[0], item[1]) in keys]
+        self._apply_section(sel or self.side_items[:1])  # una lista borrada: Inicio
+        self.views = [{"kind": kind, "key": key, "title": title, "artist": artist}
+                      for kind, key, title, artist in place.views]
+        self._sync_toolbar()
+        self._set_view(self._display_mode())
+        self.decade = place.decade
+        self.tree.selection_remove(*self.tree.selection())
+        if self.query.get() != place.query:
+            self.query.set(place.query)  # vuelve a buscar (y _on_query repinta)
+        else:
+            self.refresh_view()
+        self._mark_sidebar()
+        if place.page:
+            self._show_page_now(place.page)
+            return
+        self._fade_rows()
+        self._restore_spot(place)
         (self.grid if self.view_mode == "grid" else self.tree).focus_set()
+        top = self.sub_view
+        if top is not None and top["kind"] == "album":
+            self._want_track_numbers(top)
+
+    def _restore_spot(self, place: Place) -> None:
+        """Selección y desplazamiento de cuando se dejó el sitio."""
+        keep = [self.vid_iid[vid] for vid in place.selected if vid in self.vid_iid]
+        if keep:
+            self.tree.selection_set(keep)
+            self._on_select()
+
+        def scroll() -> None:
+            if self.view_mode == "grid":
+                self.grid.scroll_to_fraction(place.scroll)
+            else:
+                self.tree.yview_moveto(place.scroll)
+
+        self.after_idle(scroll)
+
+    def _scroll_fraction(self) -> float:
+        try:
+            if self.view_mode == "grid":
+                return self.grid.scroll_fraction()
+            return float(self.tree.yview()[0])
+        except (tk.TclError, AttributeError, ValueError):
+            return 0.0
+
+    def _sync_nav(self) -> None:
+        """Botones ‹ › y el enlace de vuelta de la página abierta."""
+        self.btn_nav_back.set_enabled(self.nav.can_back)
+        self.btn_nav_fwd.set_enabled(self.nav.can_forward)
+        page = self.active_page
+        if page is not None and hasattr(page, "set_back_label"):
+            page.set_back_label(self._place_label(self.nav.peek_back()) or "Inicio")
+
+    def _nav_tip(self, forward: bool) -> str:
+        place = self.nav.peek_forward() if forward else self.nav.peek_back()
+        name, key = ("Adelante", "Alt+→") if forward else ("Atrás", "Alt+←")
+        label = self._place_label(place)
+        return f"{name}: {label} ({key})" if label else f"{name} ({key})"
 
     def _escape(self, _e=None) -> str | None:
+        """Esc cierra lo que está encima y, en una página o un álbum, vuelve atrás."""
         if self.fullscreen:  # primero se sale de la pantalla completa; luego, de la vista
             self._set_fullscreen(False)
             return "break"
         if self.now_open:
             self.close_now_view()
             return "break"
-        if self.active_page is not None:
-            self.close_page()
-            return "break"
         if self.queue_win is not None:  # el panel «A continuación» también se cierra con Esc
             self._show_queue()
             return "break"
-        if self.views and not isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)):
-            self.close_view()
+        typing = isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text))
+        if self.active_page is not None or (self.views and not typing):
+            if self.nav.can_back:
+                self.go_back()
+            elif self.active_page is not None:
+                self.close_page()
+            else:
+                self.close_view()
             return "break"
         return None
 
     def _refresh_nav(self) -> None:
-        for name, button in (("prompt", self.btn_prompt), ("import", self.btn_import),
-                             ("downloads", self.btn_downloads),
+        for name, button in (("downloads", self.btn_downloads),
                              ("settings", self.btn_settings)):
             button.set_active(self.active_page is not None and self.active_page is self.pages.get(name))
 
@@ -2548,6 +2833,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def _refresh_downloads_icon(self) -> None:
         """Marca el icono de Descargas si el usuario las pausó o si falta espacio."""
         self.btn_downloads.set_on(self.dl_paused or self.disk_level != "ok")
+        self._refresh_downloads_badge()
 
     # ---------- streaming: URLs resueltas y reproductor preparado por adelantado ----------
     @staticmethod
@@ -2792,7 +3078,10 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self._prefetch_next()
 
     # ---------- reproducción ----------
-    def _on_double(self, _e=None) -> None:
+    def _on_double(self, e=None) -> None:
+        if (e is not None and str(e.type) == "ButtonPress"
+                and self._tree_column(e.x) in ("#0", "state")):
+            return  # ▶, ♡ y «⋯» ya actuaron con el primer clic
         sel = self._sel_rows()
         if sel:
             self.play_index(sel[0])
@@ -2992,8 +3281,6 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             view.show_tab("album" if view.tab == "queue" else "queue")
             return
         opening = self.queue_win is None
-        if opening and self.active_page is not None:
-            self.close_page()
         self.queue_win = self.drawer if opening else None
         self.queue_lb = (self.drawer_list if opening and self.drawer_mode == "queue"
                          else None)
@@ -3564,7 +3851,10 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def cycle_xfade(self) -> None:
         i = XFADE_CHOICES.index(self.xfade_ms) if self.xfade_ms in XFADE_CHOICES else 0
-        self.xfade_ms = XFADE_CHOICES[(i + 1) % len(XFADE_CHOICES)]
+        self.set_xfade(XFADE_CHOICES[(i + 1) % len(XFADE_CHOICES)])
+
+    def set_xfade(self, ms: int) -> None:
+        self.xfade_ms = ms if ms in XFADE_CHOICES else 4000
         self._refresh_toggles()
         self.save_prefs()
         self.status.configure(text="Transición: " + (
@@ -3579,7 +3869,11 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         self.save_prefs()
 
     def cycle_repeat(self) -> None:
-        self.pq.repeat = (self.pq.repeat + 1) % 3
+        self.set_repeat((self.pq.repeat + 1) % 3)
+
+    def set_repeat(self, mode: int) -> None:
+        """0 sin repetir, 1 toda la lista, 2 la canción que suena."""
+        self.pq.repeat = int(mode) % 3
         self._refresh_toggles()
         self.save_prefs()
 
@@ -3602,6 +3896,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         try:
             self._tick_once()
             self._sync_outside()
+            self._count_downloads()
         except Exception as exc:  # noqa: BLE001 - el bucle de Tk no debe quedarse sin tick
             _log.failure(log, "el tick de reproducción falló", exc)
         finally:
@@ -3667,7 +3962,6 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
 
     def _select_playlist(self, pid: int) -> None:
         """Abre la lista como si se hubiera pulsado en el lateral."""
-        self.sel_keys = {("pl", pid)}
         self._build_sidebar()
         index = self._playlist_index(pid)
         if index is None:
@@ -3835,10 +4129,12 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
             _log.failure(log, "no se pudo eliminar la lista", exc)
             self.toast.show(f"No se pudo eliminar «{name}»")
             return
+        self.nav.forget(lambda place: ("pl", pid) in place.section)
         if self.view_kind == "playlist" and self.playlist_id == pid:
             self.go_home()
         else:
             self._build_sidebar()
+        self._sync_nav()
         self.toast.show(f"Lista «{name}» eliminada", "Deshacer",
                         on_action=lambda: self._restore_playlist(name, tracks))
 
@@ -4408,7 +4704,8 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
         volume = self.vol.get()
         if volume <= 0 and self._last_volume > 0:
             volume = self._last_volume  # no guardar un 0 accidental al cerrar silenciado
-        return {"dark": self.dark, "vol": volume, "shuffle": self.pq.shuffle,
+        return {"dark": self.dark, "theme": self.theme_mode,
+                "side_folded": sorted(self._side_folded), "vol": volume, "shuffle": self.pq.shuffle,
                 "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
                 "normalize": self.normalize, "cookies": self.cookies,
                 "reduce_motion": self.anim.reduced, "auto_update": self.auto_update,
@@ -4416,7 +4713,7 @@ class App(tk.Tk, LibraryMixin, PlaybackMixin, EventLoopMixin):
                 "dupes_seen": self._dupes_seen, "mini_pos": self._mini_pos,
                 "now_tab": self._now_tab,
                 "window": {"geometry": self._normal_geometry, "zoomed": self._zoomed},
-                "ytdlp_checked_at": self._ytdlp_checked_at}
+                "ytdlp_checked_at": self._ytdlp_checked_at, **self._app_update_prefs()}
 
     def _close(self) -> None:
         self.toast.flush()  # un borrado a la espera de «Deshacer» se confirma al cerrar

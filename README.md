@@ -85,7 +85,14 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 
 - **Selección múltiple**: clic, `Ctrl+clic` y `Mayús+clic`; `Ctrl+A` selecciona la vista actual.
 - **Volver al inicio**: un clic en «Sound», arriba a la izquierda, cierra páginas y la cola, limpia
-  la búsqueda y vuelve a toda la biblioteca.
+  la búsqueda y vuelve a Inicio.
+- **Atrás y Adelante**: los botones ‹ › junto al buscador, `Alt+←` / `Alt+→` o los botones
+  laterales del ratón recorren lo visitado; al volver, cada sitio queda como estaba. En las
+  páginas de artista y álbum, la ruta sobre el título («Todo › Fleetwood Mac») lleva a cada nivel.
+- **Álbumes, artistas y listas** tienen cabecera con portada (un mosaico en las listas) y botones
+  para reproducir, en aleatorio, marcar Me gusta y más acciones. Al pasar el ratón por una
+  canción aparecen ▶, ♡ y «⋯». Las canciones se arrastran a una lista del lateral, o dentro de
+  una lista para cambiar su orden.
 - **Búsqueda instantánea**: al escribir tres letras empieza a buscar en YouTube Music; los
   resultados ya vistos aparecen al momento como pre-resultados y las primeras 20 canciones llegan
   con una sola petición.
@@ -98,16 +105,19 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Duplicados y etiquetas**: clic derecho en la lista.
 - **Archivos incompletos**: se marcan con `✗` y se conservan; clic derecho → «Volver a descargar
   (archivo incompleto)». La copia anterior se renombra como `.damaged-…`, nunca se borra sola.
-- **Música por frase**, **Importar** y **Descargas**: páginas dentro de la misma ventana.
-  `Esc` o «← Biblioteca» vuelve.
-- **Ajustes** (icono de engranaje o `Ctrl+,`): tema, animaciones, orden, repetición, cola
+- **Música por frase** e **Importar** (en «＋ Añadir música», arriba a la derecha) y
+  **Descargas** (con el número de pendientes): páginas dentro de la misma ventana, a la
+  derecha del lateral. `Esc`, Atrás o su enlace «← …» vuelven a donde se estaba.
+- **Lateral**: «Tus listas», «Géneros» y «YouTube» se pliegan con un clic en su título.
+- **Ajustes** (icono de engranaje o `Ctrl+,`): tema (como Windows, claro u oscuro), animaciones, orden, repetición, cola
   automática, transición, normalización, letras, cookies, actualización automática de yt-dlp,
-  inicio con Windows, mantenimiento y lista de atajos.
+  inicio con Windows, aviso de versiones nuevas de Sound, mantenimiento y lista de atajos.
 - **Más acciones** (icono de caja de herramientas, junto al de lista/cuadrícula): duplicados,
   exportar M3U, archivos que faltan, normalización y diagnóstico sin abrir el menú contextual.
 - **Atajos**: `Ctrl+F` buscar, `Ctrl+G` música por frase, `Ctrl+L` Me gusta,
   `Ctrl+A` seleccionar todo, `Ctrl+Shift+L` lista/cuadrícula, `Ctrl+M` silenciar, `Ctrl+↑/↓`
-  volumen, `Espacio` reproducir/pausar, `Supr` eliminar y `Esc` volver o cerrar «A continuación».
+  volumen, `Espacio` reproducir/pausar, `Supr` eliminar, `Alt+←/→` atrás y adelante y `Esc`
+  volver o cerrar «A continuación».
 - **Cookies de YouTube**: en Descargas, para resolver el aviso anti-bot tanto al descargar como al
   reproducir por streaming. Cambiar de navegador las recarga sin reiniciar.
 - **Poco espacio en disco**: si quedan menos de 2 GB, las descargas pasan a una a la vez; por

@@ -57,6 +57,7 @@ def ui_fonts(root: tk.Misc) -> dict[str, tkfont.Font]:
         body=tkfont.Font(root, family=text, size=10),
         strong=tkfont.Font(root, family=strong, size=11),
         small=tkfont.Font(root, family=text, size=9),
+        badge=tkfont.Font(root, family=strong, size=8),
         digits=tkfont.Font(root, family=pick("Bahnschrift", "Segoe UI"), size=9),
     )
 
@@ -256,6 +257,8 @@ class IconButton(tk.Canvas):
         self.anim, self.k, self.command = anim, k, command
         self.h = self.press = 0.0
         self.on = self.active = self.focused = False
+        self.enabled = True
+        self._badge: tuple = (None, None, False)  # (texto, fuente, apagado)
         self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", accent="#ffffff")
         self._disc = self._make_disc()
         self._mask = icon_mask(icon, self.g)
@@ -294,14 +297,47 @@ class IconButton(tk.Canvas):
 
     def _release(self, e) -> None:
         self._press(0.0, 170)
-        if 0 <= e.x < self.d and 0 <= e.y < self.d and self.command:
+        if 0 <= e.x < self.d and 0 <= e.y < self.d and self.command and self.enabled:
             self.command()
 
     def _key_fire(self, _e=None) -> str:
         """Activa el botón con Enter/Espacio y evita que el atajo global haga otra cosa."""
-        if self.command:
+        if self.command and self.enabled:
             self.command()
         return "break"
+
+    def set_badge(self, text: str | None, font=None, muted: bool = False) -> None:
+        """Un contador en la esquina (p. ej. descargas pendientes); None lo quita."""
+        if (text, font, muted) == self._badge:
+            return
+        self._badge = (text, font, muted)
+        self._draw_badge()
+
+    def _draw_badge(self) -> None:
+        self.delete("badge")
+        text, font, muted = self._badge
+        if not text or font is None:
+            return
+        k = self.k
+        h = max(14, int(16 * k))
+        w = max(h, font.measure(text) + int(9 * k))
+        x1, y0 = self.d - int(1 * k), int(1 * k)
+        x0, y1 = x1 - w, y0 + h
+        fill = self.c["dim"] if muted else self.c["accent"]
+        for box in ((x0, y0, x0 + h, y1), (x1 - h, y0, x1, y1)):
+            self.create_oval(*box, fill=fill, outline="", tags=("badge",))
+        self.create_rectangle(x0 + h / 2, y0, x1 - h / 2, y1, fill=fill, outline="",
+                              tags=("badge",))
+        self.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=text, font=font,
+                         fill=self.c["bg"], tags=("badge",))
+
+    def set_enabled(self, on: bool) -> None:
+        """Apagado: el icono se atenúa y el clic no hace nada (p. ej. Atrás sin sitio al que
+        volver). La ayuda sigue saliendo para decir qué es."""
+        if on != self.enabled:
+            self.enabled = on
+            self.configure(cursor="hand2" if on and self.command else "arrow")
+            self._render()
 
     def _focus(self, on: bool) -> None:
         self.focused = on
@@ -312,10 +348,13 @@ class IconButton(tk.Canvas):
         c = self.c
         repaint = (c["fg"], c["dim"]) != (fg, dim) or self.h > 0.01 or (
             (self.on or self.active or self.focused) and c["accent"] != accent) or self._painted.photo is None
+        recolor = self._badge[0] and (c["bg"], c["accent"]) != (bg, accent)
         c.update(bg=bg, fg=fg, dim=dim, accent=accent)
         self.configure(bg=bg)
         if repaint:
             self._render()
+        if recolor:
+            self._draw_badge()
 
     def set_on(self, on: bool) -> None:
         if on != self.on:
@@ -335,7 +374,7 @@ class IconButton(tk.Canvas):
     def _render(self) -> None:
         c, d = self.c, self.d
         img = Image.new("RGBA", (d, d), (0, 0, 0, 0))
-        if self.h > 0.01:
+        if self.h > 0.01 and self.enabled:
             alpha = self.h
             img.alpha_composite(_layer(self._disc.point(lambda v: int(v * alpha)),
                                        blend(c["bg"], c["fg"], 0.10)))
@@ -345,6 +384,8 @@ class IconButton(tk.Canvas):
             img.alpha_composite(_layer(edge, c["accent"]))
         color = c["accent"] if self.on else (c["dim"] if self.command is None else
                                              blend(c["dim"], c["fg"], self.h))
+        if not self.enabled:
+            color = blend(c["bg"], c["dim"], 0.45)
         size = max(4, int(self.g * (1 - 0.1 * self.press)))
         mask = self._mask if size == self.g else self._mask.resize((size, size), Image.LANCZOS)
         off = (d - size) // 2
@@ -655,6 +696,229 @@ class PillButton(tk.Canvas):
 
 
 
+class Switch(tk.Canvas):
+    """Interruptor de sí / no, como los de Windows: la bola se desliza y el carril toma el acento.
+
+    Se cambia con clic, Espacio o Intro. `command()` hace el cambio en la app; quien lo pinta
+    llama después a `set(valor)` con lo que de verdad quedó (p. ej. si algo no se pudo activar).
+    """
+
+    def __init__(self, master, anim: Animator, k: float, command, width: int = 44,
+                 height: int = 24) -> None:
+        self.w, self.h_ = int(width * k), int(height * k)
+        super().__init__(master, width=self.w, height=self.h_, highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=1)
+        self.anim, self.k, self.command = anim, k, command
+        self.on = False
+        self.pos = self.h = 0.0  # bola (0 izquierda, 1 derecha) y ratón encima
+        self.enabled = True
+        self.focused = False
+        self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", accent="#ffffff",
+                      on_accent="#000000")
+        self._painted = _Painted(self)
+        self.bind("<Enter>", lambda e: self._animate("h", 1.0, 110))
+        self.bind("<Leave>", lambda e: self._animate("h", 0.0, 170))
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<space>", self._key)
+        self.bind("<Return>", self._key)
+        self.bind("<FocusIn>", lambda e: self._focus(True))
+        self.bind("<FocusOut>", lambda e: self._focus(False))
+
+    def _animate(self, attr: str, to: float, ms: int) -> None:
+        start = getattr(self, attr)
+
+        def step(q: float) -> None:
+            setattr(self, attr, start + (to - start) * q)
+            self._render()
+
+        self.anim.tween((attr, id(self)), ms, step)
+
+    def set(self, on: bool, animate: bool = True) -> None:
+        on = bool(on)
+        if on == self.on and self._painted.photo is not None:
+            return
+        self.on = on
+        if animate and self._painted.photo is not None:
+            self._animate("pos", 1.0 if on else 0.0, 160)
+        else:
+            self.pos = 1.0 if on else 0.0
+            self._render()
+
+    def set_enabled(self, on: bool) -> None:
+        if on != self.enabled:
+            self.enabled = on
+            self.configure(cursor="hand2" if on else "arrow", takefocus=1 if on else 0)
+            self._render()
+
+    def restyle(self, **colors) -> None:
+        self.c.update({key: value for key, value in colors.items() if key in self.c})
+        self.configure(bg=self.c["bg"])
+        self._render()
+
+    def _fire(self) -> None:
+        if self.enabled and self.command:
+            self.command()
+
+    def _release(self, e) -> None:
+        if 0 <= e.x < self.w and 0 <= e.y < self.h_:
+            self._fire()
+
+    def _key(self, _e=None) -> str:
+        self._fire()
+        return "break"
+
+    def _focus(self, on: bool) -> None:
+        self.focused = on
+        self._render()
+
+    def _render(self) -> None:
+        c, k, n = self.c, self.k, SS
+        w, h = self.w * n, self.h_ * n
+        p = self.pos
+        accent = c["accent"] if self.enabled else blend(c["bg"], c["dim"], 0.5)
+        fill = blend(blend(c["bg"], c["fg"], 0.05 * self.h), accent, p)
+        border = blend(c["dim"], accent, p)
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        inset = n * 2
+        draw.rounded_rectangle((inset, inset, w - inset - 1, h - inset - 1),
+                               radius=(h - 2 * inset) // 2, fill=fill, outline=border,
+                               width=max(n, int(1.4 * k * n)))
+        if self.focused and self.enabled:
+            draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=h // 2,
+                                   outline=c["accent"], width=max(n, int(k * n)))
+        r = h * (0.20 + 0.06 * p + 0.02 * self.h)
+        cx = h / 2 + (w - h) * p
+        knob = blend(c["dim"], c["on_accent"], p) if self.enabled else blend(c["bg"], c["dim"], 0.7)
+        draw.ellipse((cx - r, h / 2 - r, cx + r, h / 2 + r), fill=knob)
+        self._painted.show(img.resize((self.w, self.h_), Image.LANCZOS))
+
+
+class Segmented(tk.Canvas):
+    """Varias opciones a la vista y una elegida (Repetir: No · Lista · Canción).
+
+    La elegida lleva una píldora que se desliza hasta la nueva. Clic, o ← → con el foco,
+    la cambian; `command(valor)` hace el cambio en la app y `set(valor)` lo pinta.
+    """
+
+    def __init__(self, master, anim: Animator, k: float, options: list[tuple], command, font,
+                 height: int = 34) -> None:
+        self.options = list(options)  # [(valor, texto)]
+        self.k, self.font = k, font
+        self.h_ = int(height * k)
+        self.inset = int(3 * k)
+        pad = int(14 * k)
+        self.widths = [font.measure(label) + 2 * pad for _v, label in self.options]
+        self.w = sum(self.widths) + 2 * self.inset
+        super().__init__(master, width=self.w, height=self.h_, highlightthickness=0, bd=0,
+                         cursor="hand2", takefocus=1)
+        self.anim, self.command = anim, command
+        self.index = 0
+        self.pos = 0.0     # dónde está la píldora (índice, con decimales mientras se mueve)
+        self.hover: int | None = None
+        self.focused = False
+        self.c = dict(bg="#000000", fg="#ffffff", dim="#888888", accent="#ffffff")
+        self._painted = _Painted(self)
+        self._labels = [self.create_text(0, self.h_ // 2, text=label, font=font)
+                        for _v, label in self.options]
+        self._shown = False
+        self.bind("<Motion>", lambda e: self._set_hover(self._at(e.x)))
+        self.bind("<Leave>", lambda e: self._set_hover(None))
+        self.bind("<ButtonRelease-1>", self._click)
+        self.bind("<Left>", lambda e: self._step(-1))
+        self.bind("<Right>", lambda e: self._step(1))
+        self.bind("<FocusIn>", lambda e: self._focus(True))
+        self.bind("<FocusOut>", lambda e: self._focus(False))
+
+    def _boxes(self) -> list[tuple[int, int]]:
+        x, out = self.inset, []
+        for width in self.widths:
+            out.append((x, x + width))
+            x += width
+        return out
+
+    def _at(self, x: int) -> int | None:
+        for i, (x0, x1) in enumerate(self._boxes()):
+            if x0 <= x < x1:
+                return i
+        return None
+
+    def value(self):
+        return self.options[self.index][0]
+
+    def set(self, value, animate: bool = True) -> None:
+        index = next((i for i, (v, _l) in enumerate(self.options) if v == value), None)
+        if index is None or (index == self.index and self._shown):
+            return
+        self.index = index
+        if animate and self._shown:
+            start = self.pos
+
+            def step(q: float) -> None:
+                self.pos = start + (index - start) * q
+                self._render()
+
+            self.anim.tween(("seg", id(self)), 180, step, ease=ease_in_out)
+        else:
+            self.pos = float(index)
+            self._render()
+
+    def restyle(self, **colors) -> None:
+        self.c.update({key: value for key, value in colors.items() if key in self.c})
+        self.configure(bg=self.c["bg"])
+        self._render()
+
+    def _choose(self, index: int) -> None:
+        if 0 <= index < len(self.options) and index != self.index and self.command:
+            self.command(self.options[index][0])
+
+    def _click(self, e) -> None:
+        i = self._at(e.x)
+        if i is not None and 0 <= e.y < self.h_:
+            self._choose(i)
+
+    def _step(self, d: int) -> str:
+        self._choose(self.index + d)
+        return "break"
+
+    def _set_hover(self, i: int | None) -> None:
+        if i != self.hover:
+            self.hover = i
+            self._render()
+
+    def _focus(self, on: bool) -> None:
+        self.focused = on
+        self._render()
+
+    def _render(self) -> None:
+        self._shown = True
+        c, n = self.c, SS
+        w, h = self.w * n, self.h_ * n
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        track = blend(c["bg"], c["fg"], 0.07)
+        draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=h // 2, fill=track,
+                               outline=c["accent"] if self.focused else None,
+                               width=max(n, int(self.k * n)))
+        boxes = self._boxes()
+        lo = max(0, min(len(boxes) - 1, int(self.pos)))
+        hi = min(len(boxes) - 1, lo + 1)
+        f = self.pos - lo
+        x0 = boxes[lo][0] + (boxes[hi][0] - boxes[lo][0]) * f
+        x1 = boxes[lo][1] + (boxes[hi][1] - boxes[lo][1]) * f
+        inset = self.inset * n
+        draw.rounded_rectangle((x0 * n, inset, x1 * n - 1, h - inset - 1),
+                               radius=(h - 2 * inset) // 2,
+                               fill=blend(c["bg"], c["accent"], 0.30))
+        self._painted.show(img.resize((self.w, self.h_), Image.LANCZOS))
+        self.tag_raise("all")
+        self.tag_lower(self._painted.item)
+        for i, ((a, b), item) in enumerate(zip(boxes, self._labels)):
+            self.coords(item, (a + b) / 2, self.h_ // 2)
+            color = c["fg"] if i == self.index or i == self.hover else c["dim"]
+            self.itemconfigure(item, fill=color)
+
+
 class ChipBar(tk.Canvas):
     """Opciones excluyentes en forma de pastilla (las décadas de la vista, por ejemplo).
 
@@ -760,6 +1024,7 @@ class SwapText:
                                         anchor="w", fill=self.bg, tags=self.tags)
 
         def step(p: float) -> None:
+            x, y = self.x, self.y  # la cabecera puede estar cambiando de forma a la vez
             c.coords(new, x, y + rise * (1 - p))
             c.itemconfigure(new, fill=blend(self.bg, self.fg, p))
             c.coords(old, x, y - rise * p)
@@ -911,51 +1176,85 @@ class NowPlaying(tk.Canvas):
 
 
 class Header(tk.Canvas):
-    """Cabecera: título grande y línea de estado sobre un degradado teñido por la portada."""
+    """Cabecera: título grande y línea de estado sobre un degradado teñido por la portada.
+
+    Tiene tres formas y pasa de una a otra con una transición:
+    - sencilla: título y estado en una línea (Inicio, Todo, un género, una búsqueda…);
+    - con la ruta encima («Todo › Fleetwood Mac»): cada tramo lleva a ese nivel;
+    - de portada (álbum, artista, lista): portada grande, el tipo («ÁLBUM · 1987»), el título,
+      de quién es (un enlace), el estado y los botones de reproducir (`set_bar`). Al desplazar
+      la lista se recoge en la sencilla para dejar sitio (`set_collapsed`).
+    """
+
+    ART = 132  # lado de la portada, a 96 ppp
 
     def __init__(self, master, anim: Animator, k: float, fonts: dict, x: int) -> None:
         # compacta: el estado va en la misma línea que el título, sobre su línea base
-        self.h = int(58 * k)
+        self.base_h = self.h = int(58 * k)
         super().__init__(master, height=self.h, highlightthickness=0, bd=0)
-        self.anim, self.pad, self.gap = anim, x, int(16 * k)
+        self.anim, self.k, self.pad, self.gap = anim, k, x, int(16 * k)
         self.colors = ("#000000", "#000000")
         self._painted = _Painted(self)
+        self._painted_key = None
+        self._grad_end = self.h  # el degradado llega al fondo aquí (encima de los botones)
         display, small = fonts["display"], fonts["small"]
-        y = int(26 * k)
+        self.small, self.body = small, fonts["body"]
+        self.title_y = y = int(26 * k)
         # centro vertical del texto pequeño para que comparta línea base con el título
         baseline = y + (display.metrics("ascent") - display.metrics("descent")) / 2
         sub_y = round(baseline - (small.metrics("ascent") - small.metrics("descent")) / 2)
+        self.sub_dy = sub_y - y
+        # la ruta va encima del título: lo que crece la cabecera y a qué altura queda
+        self.trail_room = small.metrics("linespace") + int(8 * k)
+        self.trail_dy = -round(display.metrics("linespace") / 2 + small.metrics("linespace") / 2
+                               - 3 * k)
         self.title = SwapText(self, anim, display, x, y, int(10 * k))
         self.sub = SwapText(self, anim, small, x, sub_y, 0)
         self._dim = self._fg = "#888888"
-        self.bind("<Configure>", self._resized)
+        self._trail: list[tuple[str, object]] = []
+        self._trail_items: list[tuple[int, bool]] = []  # (texto en el lienzo, ¿es un enlace?)
+        self._trail_on = 0.0  # 0: sin ruta; 1: con ruta (entre medias, en la transición)
+        self._trail_to = 0.0
+        self._hot: int | None = None  # tramo bajo el ratón
+        # la forma de portada
+        self.art_side = int(self.ART * k)
+        self.hero_body = int(16 * k) + self.art_side + int(18 * k)
+        self._hero: dict | None = None
+        self._hero_on = 0.0
+        self._hero_to = 0.0
+        self._collapsed = False
+        self._art_photo = None
+        self._art_item = self.create_image(0, 0, anchor="nw", state="hidden")
+        self._kind_item = self.create_text(0, 0, text="", font=small, anchor="w", state="hidden")
+        self._by_item = self.create_text(0, 0, text="", font=self.body, anchor="w",
+                                         state="hidden", tags=("byline",))
+        self._by_hot = False
+        self.tag_bind("byline", "<Enter>", lambda e: self._byline_hover(True))
+        self.tag_bind("byline", "<Leave>", lambda e: self._byline_hover(False))
+        self.tag_bind("byline", "<ButtonRelease-1>", lambda e: self._byline_click())
+        self._bar = None
+        self._bar_item = None
+        self.on_bar_color = None  # quien pone los botones los repinta con el fondo de su altura
+        self.bind("<Configure>", lambda e: self._layout())
 
-    def _resized(self, e) -> None:
-        self.title.max_w = max(1, int((e.width - self.pad) * 0.6))
-        self.title.refit()
-        self._place_sub()
-        self._paint()
-
-    def _place_sub(self) -> None:
-        """El estado empieza donde acaba el título y ocupa el resto de la línea."""
-        x = self.pad + self.title.font.measure(self.title._fit(self.title.text)) + self.gap
-        self.sub.x = x
-        self.coords(self.sub.item, x, self.sub.y)
-        self.sub.max_w = max(1, self.winfo_width() - x - 16)
-        self.sub.refit()
-
+    # ---------- pintar ----------
     def _paint(self) -> None:
         w = max(1, self.winfo_width())
+        key = (w, self.h, self._grad_end, self.colors)
+        if key == self._painted_key:
+            return
+        self._painted_key = key
         top, bottom = self.colors
         tr, tg, tb = _rgb(top)
         br, bg, bb = _rgb(bottom)
         col = Image.new("RGB", (1, self.h))
-        last = max(1, self.h - 1)
-        col.putdata([(round(tr + (br - tr) * (y / last) ** 1.3),
-                      round(tg + (bg - tg) * (y / last) ** 1.3),
-                      round(tb + (bb - tb) * (y / last) ** 1.3)) for y in range(self.h)])
+        last = max(1, min(self.h, self._grad_end) - 1)
+        ramp = [min(1.0, y / last) ** 1.3 for y in range(self.h)]
+        col.putdata([(round(tr + (br - tr) * f), round(tg + (bg - tg) * f),
+                      round(tb + (bb - tb) * f)) for f in ramp])
         self._painted.show(col.resize((w, self.h), Image.NEAREST))
         self.tag_lower(self._painted.item)
+
 
     def restyle(self, top: str, bottom: str, fg: str, dim: str) -> None:
         self.colors = (top, bottom)
@@ -964,11 +1263,14 @@ class Header(tk.Canvas):
         mid = blend(top, bottom, 0.5)
         self.title.recolor(fg, mid)
         self.sub.recolor(dim, mid)
+        self._recolor_trail()
+        self._recolor_hero()
         self._paint()
+        self._bar_restyle()
 
     def set_title(self, text: str, animate: bool = True) -> None:
         self.title.set(text, animate)
-        self._place_sub()
+        self._layout()
 
     def set_status(self, text: str) -> None:
         if text == self.sub.text:
@@ -977,6 +1279,215 @@ class Header(tk.Canvas):
         item, fg, dim = self.sub.item, self._fg, self._dim
         self.anim.tween(("status", id(self)), 700,
                         lambda p: self.itemconfigure(item, fill=blend(fg, dim, p)))
+
+    # ---------- la ruta ----------
+    def set_trail(self, parts: list[tuple[str, object]]) -> None:
+        """Tramos (texto, al pulsar) que llevan hasta lo que se ve; [] la quita."""
+        parts = list(parts)
+        if parts and self._trail_to == 1.0 and [t for t, _c in parts] == [
+                t for t, _c in self._trail]:
+            self._trail = parts
+            return
+        if parts:
+            self._trail = parts
+            self._hot = None
+            self._draw_trail()
+        target = 1.0 if parts else 0.0
+        if target == self._trail_to:
+            return
+        self._trail_to = target
+        start = self._trail_on
+
+        def step(p: float) -> None:
+            self._trail_on = start + (target - start) * p
+            self._layout()
+
+        def done() -> None:
+            if not self._trail_to:  # se fue del todo: se borra
+                self._trail = []
+                self._trail_items = []
+                self.delete("trail")
+                self.configure(cursor="")
+
+        self.anim.tween(("trail", id(self)), 200, step, done=done)
+
+    def _draw_trail(self) -> None:
+        self.delete("trail")
+        self._trail_items = []
+        x, y = self.pad, self._trail_y()
+        gap = int(7 * self.k)
+        for i, (text, command) in enumerate(self._trail):
+            if i:
+                sep = self.create_text(x, y, text="›", font=self.small, anchor="w",
+                                       tags=("trail",))
+                self._trail_items.append((sep, False))
+                x += self.small.measure("›") + gap
+            label = elide(self.small, text, int(240 * self.k))
+            tag = f"trail{i}"
+            item = self.create_text(x, y, text=label, font=self.small, anchor="w",
+                                    tags=("trail", tag))
+            self._trail_items.append((item, command is not None))
+            if command is not None:
+                self.tag_bind(tag, "<Enter>", lambda e, it=item: self._trail_hover(it))
+                self.tag_bind(tag, "<Leave>", lambda e: self._trail_hover(None))
+                self.tag_bind(tag, "<ButtonRelease-1>", lambda e, cmd=command: cmd())
+            x += self.small.measure(label) + gap
+        self._recolor_trail()
+
+    def _trail_y(self) -> int:
+        extra = round(self.trail_room * self._trail_on)
+        return self.title_y + extra + self.trail_dy - round(
+            self.trail_room * (1 - self._trail_on) * 0.5)
+
+    def _trail_hover(self, item: int | None) -> None:
+        self._hot = item
+        self.configure(cursor="hand2" if item is not None else "")
+        self._recolor_trail()
+
+    def _recolor_trail(self) -> None:
+        t, base = self._trail_on, self.colors[0]
+        for item, link in self._trail_items:
+            color = self._fg if item == self._hot else (
+                self._dim if link else blend(base, self._dim, 0.55))
+            self.itemconfigure(item, fill=blend(base, color, t))
+
+    # ---------- la forma de portada ----------
+    def set_bar(self, widget) -> None:
+        """Los botones de la forma de portada (un Frame hijo de esta cabecera)."""
+        self._bar = widget
+        self._bar_item = self.create_window(0, 0, window=widget, anchor="w", state="hidden")
+
+    def set_hero(self, info: dict | None) -> None:
+        """`info`: key, kind («ÁLBUM · 1987»), byline (texto, al pulsar) o None, art (Pillow
+        RGBA del lado de la portada) o None. None vuelve a la forma sencilla."""
+        if info is not None:
+            fresh = self._hero is None or self._hero.get("key") != info.get("key")
+            self._hero = info
+            self.itemconfigure(self._kind_item, text=info.get("kind") or "")
+            byline = info.get("byline")
+            self.itemconfigure(self._by_item, text=byline[0] if byline else "")
+            if info.get("art") is not None or fresh:
+                self.set_art(info.get("art"))
+            if fresh:
+                self._collapsed = False
+        else:
+            self._hero = None
+        self._retarget_hero()
+
+    def set_art(self, art) -> None:
+        self._art_photo = ImageTk.PhotoImage(art) if art is not None else None
+        self.itemconfigure(self._art_item, image=self._art_photo or "")
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Con la lista desplazada, la portada se recoge; arriba del todo, vuelve."""
+        if self._hero is not None and collapsed != self._collapsed:
+            self._collapsed = collapsed
+            self._retarget_hero()
+
+    @property
+    def hero_key(self):
+        return self._hero.get("key") if self._hero else None
+
+    def _retarget_hero(self) -> None:
+        target = 1.0 if self._hero is not None and not self._collapsed else 0.0
+        if target == self._hero_to:
+            self._layout()
+            return
+        self._hero_to = target
+        start = self._hero_on
+
+        def step(p: float) -> None:
+            self._hero_on = start + (target - start) * p
+            self._layout()
+
+        def done() -> None:
+            if self._hero is None:  # se fue: nada de lo de la portada queda a la vista
+                self.itemconfigure(self._kind_item, text="")
+                self.itemconfigure(self._by_item, text="")
+                self.set_art(None)
+                self._layout()
+
+        self.anim.tween(("hero", id(self)), 240, step, ease=ease_in_out, done=done)
+
+    def _byline_hover(self, on: bool) -> None:
+        byline = self._hero.get("byline") if self._hero else None
+        self._by_hot = on and bool(byline and byline[1])
+        self.configure(cursor="hand2" if self._by_hot else "")
+        self._recolor_hero()
+
+    def _byline_click(self) -> None:
+        byline = self._hero.get("byline") if self._hero else None
+        if byline and byline[1] and self._hero_on > 0.5:
+            byline[1]()
+
+    def _recolor_hero(self) -> None:
+        t, base = self._hero_on, self.colors[0]
+        self.itemconfigure(self._kind_item, fill=blend(base, self._dim, t))
+        by = self._fg if self._by_hot else blend(self._dim, self._fg, 0.72)
+        self.itemconfigure(self._by_item, fill=blend(base, by, t))
+
+    def bar_color(self) -> str:
+        """El fondo de los botones: el degradado termina encima de ellos, en el fondo liso."""
+        return self.colors[1]
+
+    def _bar_restyle(self) -> None:
+        if self._bar is not None and self.on_bar_color is not None:
+            self.on_bar_color(self.bar_color())
+
+    # ---------- colocar ----------
+    def _layout(self) -> None:
+        """Altura y posiciones según lo visibles que estén la ruta y la portada (0 a 1)."""
+        k, t = self.k, self._hero_on
+        trail = round(self.trail_room * self._trail_on)
+        plain_h = self.base_h + trail
+        h = round(plain_h + (trail + self.hero_body - plain_h) * t)
+        if h != self.h:
+            self.h = h
+            self.configure(height=h)
+        width = max(1, self.winfo_width())
+        top = trail + int(16 * k)  # arriba de la portada
+        self._grad_end = round(h + (top + int(92 * k) - h) * t)
+        text_x = self.pad + self.art_side + int(22 * k)
+
+        def mix(a: float, b: float) -> int:
+            return round(a + (b - a) * t)
+
+        # el título: a la izquierda en la sencilla, junto a la portada en la otra
+        title = self.title
+        title.x = mix(self.pad, text_x)
+        title.y = mix(self.title_y + trail, top + int(46 * k))
+        title.max_w = max(1, mix((width - self.pad) * 0.6, width - text_x - int(24 * k)))
+        title.refit()
+        if title._old is None:  # si el título está cambiando, su animación lo coloca
+            self.coords(title.item, title.x, title.y)
+        # el estado: tras el título; en la de portada, debajo, tras el enlace de quién es
+        by_text = self.itemcget(self._by_item, "text")
+        by_w = self.body.measure(by_text) + int(10 * k) if by_text else 0
+        line_y = top + int(80 * k)
+        plain_x = self.pad + title.font.measure(title._fit(title.text)) + self.gap
+        self.sub.x = mix(plain_x, text_x + by_w)
+        self.sub.y = mix(self.title_y + trail + self.sub_dy, line_y)
+        self.coords(self.sub.item, self.sub.x, self.sub.y)
+        self.sub.max_w = max(1, width - self.sub.x - 16)
+        self.sub.refit()
+        # portada, tipo, quién y botones: bajan desde arriba al aparecer
+        slide = round((1 - t) * (self.art_side + int(24 * k)))
+        shown = "normal" if t > 0.01 else "hidden"
+        self.coords(self._art_item, self.pad, top - slide)
+        self.coords(self._kind_item, text_x, top + int(12 * k) - slide // 2)
+        self.coords(self._by_item, text_x, line_y)
+        for item in (self._art_item, self._kind_item, self._by_item):
+            self.itemconfigure(item, state=shown)
+        if self._bar_item is not None:
+            self.coords(self._bar_item, text_x, top + int(114 * k) - slide)
+            self.itemconfigure(self._bar_item, state="normal" if t > 0.55 else "hidden")
+        # la ruta baja desde arriba mientras aparece
+        y = self._trail_y()
+        for item, _link in self._trail_items:
+            self.coords(item, self.coords(item)[0], y)
+        self._recolor_trail()
+        self._recolor_hero()
+        self._paint()
 
 
 class StatusLine:
@@ -1778,9 +2289,12 @@ class RowList(tk.Canvas):
 
     def __init__(self, master, anim: Animator, k: float, fonts: dict, on_select=None,
                  on_activate=None, multi: bool = True, row: int = 30, on_move=None,
-                 on_context=None) -> None:
+                 on_context=None, reselect: bool = False, on_header=None) -> None:
         super().__init__(master, highlightthickness=0, bd=0, takefocus=1)
         self.anim, self.k, self.fonts = anim, k, fonts
+        self.on_header = on_header  # clic en un encabezado plegable (con «fold» en su dict)
+        self._hdr_hot: int | None = None
+        self.reselect = reselect  # un clic en la fila ya elegida también llama a on_select
         self.on_select, self.on_activate, self.multi = on_select, on_activate, multi
         self.on_move, self.on_context = on_move, on_context
         self.rh, self.hh, self.gap, self.pad = int(row * k), int(24 * k), int(14 * k), int(12 * k)
@@ -1811,7 +2325,7 @@ class RowList(tk.Canvas):
         self.bind("<ButtonPress-1>", self._press)
         self.bind("<Double-Button-1>", self._double)
         self.bind("<Motion>", self._motion)
-        self.bind("<Leave>", lambda e: self._set_hover(None))
+        self.bind("<Leave>", lambda e: (self._set_hover(None), self._set_header_hot(None)))
         self.bind("<MouseWheel>", self._wheel)
         bind_touchpad(self, self._touchpad)
         self.bind("<Up>", lambda e: self._key(-1))
@@ -1868,7 +2382,7 @@ class RowList(tk.Canvas):
     def _text_color(self, i: int) -> str:
         it = self.items[i]
         if it.get("hdr"):
-            return self.c["faint"]
+            return self.c["fg"] if i == self._hdr_hot else self.c["faint"]
         if it.get("color"):
             return it["color"]
         return self.c["fg"] if i in self.sel or i == self.hovered else self.c["dim"]
@@ -1970,14 +2484,37 @@ class RowList(tk.Canvas):
                 return None if self.items[i].get("hdr") else i
         return None
 
+    def _header_at(self, y: float) -> int | None:
+        """Encabezado plegable bajo `y` (coordenada del lienzo), o None."""
+        for i, (top, h) in enumerate(self.pos):
+            if top <= y < top + h:
+                it = self.items[i]
+                return i if it.get("hdr") and "fold" in it and self.on_header else None
+        return None
+
+    def _set_header_hot(self, i: int | None) -> None:
+        if i == self._hdr_hot:
+            return
+        old, self._hdr_hot = self._hdr_hot, i
+        for j in (old, i):
+            if j is not None and j < len(self.text_ids):
+                self.itemconfigure(self.text_ids[j], fill=self._text_color(j))
+
     def _motion(self, e) -> None:
         i = self._hit(self.canvasy(e.y))
-        self.configure(cursor="hand2" if i is not None else "arrow")
+        header = self._header_at(self.canvasy(e.y)) if i is None else None
+        self._set_header_hot(header)
+        self.configure(cursor="hand2" if i is not None or header is not None else "arrow")
         self._set_hover(i)
 
     def _press(self, e) -> None:
         self.tip.hide()
         self.focus_set()
+        header = self._header_at(self.canvasy(e.y))
+        if header is not None:  # plegar o desplegar la sección
+            self._hdr_hot = None
+            self.on_header(header)
+            return
         i = self._hit(self.canvasy(e.y))
         self._press_y = e.y
         self._drag_from = i if i is not None and self.items[i].get("move") else None
@@ -1996,6 +2533,8 @@ class RowList(tk.Canvas):
         else:
             self.sel, self.anchor = {i}, i
         self._selection_changed(prev)
+        if self.reselect and prev == self.sel and self.on_select and not (ctrl or shift):
+            self.on_select()
 
     # ---------- arrastrar para ordenar ----------
     def _movers(self) -> list[int]:
