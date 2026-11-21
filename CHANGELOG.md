@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 1.4.0 — 2026-11-21
 
 ### Navegación
 - **Atrás y Adelante, como en un navegador**: botones ‹ › junto al buscador, `Alt+←` / `Alt+→`
