@@ -1,8 +1,6 @@
 """Ventana principal: biblioteca local + YT Music (por género) + reproductor."""
 import datetime
 import io
-import itertools
-import math
 import queue
 import re
 import threading
@@ -44,7 +42,9 @@ from .lyrics_view import LyricsView
 from .navigation import NavigationMixin, Place, section_key
 from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
+from .playlists_ui import PlaylistsMixin
 from .playqueue import PlayQueue
+from .search import SearchMixin
 from .sleep_timer import SleepTimerMixin
 from .theme import (
     FONT_FAMILY,
@@ -58,6 +58,7 @@ from .theme import (
     vivid,
 )
 from .toast import Toast
+from .up_next import DRAWER_W, UpNextMixin
 from .welcome import TITLE as WELCOME_TITLE
 from .welcome import WelcomeMixin
 from .widgets import (
@@ -84,7 +85,6 @@ from .widgets import (
 log = _log.get("ui")
 FONT = (FONT_FAMILY, 10)
 SIDE_W = 200  # ancho de la barra de géneros, en píxeles a 96 ppp
-DRAWER_W = 340  # ancho del panel «A continuación»
 XFADE_CHOICES = (0, 2000, 4000, 6000, 8000, 12000)  # ms; 0 = gapless
 MANUAL_FADE_MS = 280       # fundido al saltar de canción a mano
 INTRO_FADE_MS = 150        # entrada al empezar desde silencio
@@ -94,10 +94,6 @@ STALL_S = 8      # segundos sin avanzar (sin internet) antes de saltar a la cola
 BACKUP_AFTER_MS = 10_000  # una canción en streaming se guarda tras escucharla este tiempo
 AUTO_UPDATE_DELAY_MS = 20_000       # dejar arrancar la ventana antes de buscar actualizaciones
 AUTO_UPDATE_RETRY_MS = 10 * 60_000  # si hay descargas en curso, reintentar más tarde
-SEARCH_DEBOUNCE_MS = 200  # búsqueda automática en YT Music al dejar de escribir
-SEARCH_MIN_CHARS = 3      # menos que esto no merece una petición
-SEARCH_FIRST_PAGE = 20    # lo que se pide primero: una sola petición, resultados ya
-SEARCH_LIMIT = 40         # el resto se completa luego, sin hacer esperar
 COLS = (("title", "Título", 280), ("artist", "Artista", 170), ("album", "Álbum", 170),
         ("dur", "Dur.", 50), ("state", "", 84))
 
@@ -119,7 +115,8 @@ DUPES_CHECK_MS = 8000  # tras arrancar, se buscan canciones repetidas para ofrec
 
 
 class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMixin,
-          SleepTimerMixin, WelcomeMixin, LibraryMixin, PlaybackMixin, EventLoopMixin):
+          SleepTimerMixin, WelcomeMixin, PlaylistsMixin, SearchMixin, UpNextMixin,
+          LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
         self.pq = PlayQueue(self._is_remote, lambda: self.online)
@@ -1481,99 +1478,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self._mark_hover = False
         self.mark.configure(fg=self.pal["fg"])
 
-    def _on_query(self) -> None:
-        q = self.query.get().strip()
-        tracking = not self._nav_busy  # al volver a un sitio guardado no se apunta nada
-        was = self._nav_searching
-        self._nav_searching = bool(q)
-        if tracking and q and not was:
-            self._note_here(force=True)  # la lista aún enseña el sitio que se deja
-        if q:
-            self.close_views()  # buscar sale de la página de álbum o artista…
-            self._hide_page()   # …y de Ajustes, Importar o Descargas
-        if q and self.view_kind in ("home", "liked", "recent", "top", "playlist"):
-            # buscar desde una vista especial busca en toda la biblioteca
-            self.view_kind = "all"
-            self.genre_filter = set()
-            self.yt_sel = []
-            self.sel_keys = {("all", None)}
-            self._build_sidebar()
-        self.search_id += 1  # lo que esté en vuelo ya no corresponde a lo que se está escribiendo
-        self.searching = len(q) >= SEARCH_MIN_CHARS
-        self._show_pre_results(q)
-        if self._qdebounce:
-            self.after_cancel(self._qdebounce)
-            self._qdebounce = None
-        if tracking and was and not q and self._leave_search():
-            return  # al borrar la búsqueda se vuelve a donde se estaba antes de buscar
-        self.refresh_view()
-        if len(q) >= SEARCH_MIN_CHARS:  # búsqueda automática en YT Music al dejar de escribir
-            if len(q) == SEARCH_MIN_CHARS:
-                # primera pista ya, mientras se sigue escribiendo: el resto se completa después
-                self.search("songs", auto=True)
-            self._qdebounce = self.after(
-                SEARCH_DEBOUNCE_MS, lambda: self.search("songs", auto=True))
-        if tracking:
-            self._visited()
-
-    def _show_pre_results(self, q: str) -> None:
-        """Pinta al instante resultados ya vistos para esta búsqueda o para un prefijo suyo.
-
-        Así la lista nunca se queda vacía ni parpadea al escribir: los pre-resultados ocupan
-        su sitio y se sustituyen cuando llega la respuesta definitiva de YouTube.
-        """
-        if not q:
-            if self.remote_src in ("songs", "genre"):
-                self.remote, self.remote_src, self.remote_q = [], None, ""
-            return
-        from ..core import ytsearch
-        hit = ytsearch.cached_songs(q)
-        if hit is not None:
-            if self.remote_src not in ("songs", "genre", None):
-                return  # hay una vista abierta (géneros, importación): no se pisa
-            _query, tracks = hit
-            self.remote, self.remote_src, self.remote_q = tracks, "songs", q
-            self.searching = False  # ya hay algo que enseñar
-            return
-        if self.remote_src not in ("songs", "genre"):
-            return
-        if len(q) < SEARCH_MIN_CHARS:
-            # Sin búsqueda automática no habría quien sustituya estos resultados: se quitan.
-            self.remote, self.remote_src, self.remote_q = [], None, ""
-            return
-        if self._related_query(q, self.remote_q):
-            # La consulta nueva continúa (o recorta) la anterior: sus resultados aún sirven.
-            self.remote_q = q
-            return
-        self.remote, self.remote_src, self.remote_q = [], None, ""
-
-    @staticmethod
-    def _related_query(a: str, b: str) -> bool:
-        """¿Una consulta es prefijo de la otra? Entonces lo que ya se vio sigue siendo útil."""
-        a, b = a.casefold().strip(), (b or "").casefold().strip()
-        return bool(a and b and (a.startswith(b) or b.startswith(a)))
-
-    @staticmethod
-    def _warm_search() -> None:
-        from ..core import ytsearch
-        ytsearch.warm_up()
-
-    def _rebuild_search_cache(self) -> None:
-        self._search_cache = {
-            t["video_id"]: fold(f"{t['title']} {t['artist']} {t.get('album') or ''}")
-            for t in self.library
-        }
-
-    def _search_text(self, t: dict) -> str:
-        """Texto normalizado de una fila; se memoriza porque la búsqueda corre en cada tecla."""
-        vid = t.get("video_id")
-        if vid and vid in self._search_cache:
-            return self._search_cache[vid]
-        text = fold(f"{t['title']} {t['artist']} {t.get('album') or ''}")
-        if vid:
-            self._search_cache[vid] = text
-        return text
-
     def _upsert_track(self, track: dict) -> None:
         """Actualiza una sola canción tras una descarga, sin releer toda la biblioteca."""
         vid = track["video_id"]
@@ -2404,113 +2308,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.status.configure(
             text=f"Etiquetas actualizadas: {updated.get('artist')} - {updated.get('title')}")
 
-    # ---------- búsqueda en YT Music ----------
-    def _load_yt_genres(self) -> None:
-        def work() -> None:
-            try:
-                from ..core import genres
-                # géneros fijos del sidebar
-                self.q.put(("genres", genres.sidebar_genres()))
-            except Exception as exc:  # noqa: BLE001 - sin internet
-                _log.failure(log, "no se pudieron cargar los géneros de YT Music", exc)
-                self.q.put(("genres", None))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _tag_results(self, tracks: list[dict], genre: str | None) -> list[dict]:
-        for t in tracks:
-            t["_genre"] = genre
-        return tracks
-
-    def _search_in_flight(self, q: str) -> bool:
-        """¿Ya hay una petición en curso para esta misma consulta? No se duplica."""
-        running = self._remote_inflight
-        return bool(running and running[0] == q and time.monotonic() - running[1] < 15)
-
-    def search(self, kind: str = "songs", auto: bool = False) -> None:
-        q = self.query.get().strip()
-        if not q:
-            return
-        if kind == "songs" and self._search_in_flight(q):
-            return
-        if self.active_page is not None:
-            self.close_page()
-        if self._qdebounce:
-            self.after_cancel(self._qdebounce)
-            self._qdebounce = None
-        self.searching = True
-        self.status.configure(text="Buscando en YouTube…")
-        self.search_id += 1
-        sid = self.search_id
-        marker = None
-        if kind == "songs":
-            marker = self._remote_inflight = (q, time.monotonic())
-
-        def work() -> None:
-            try:
-                if sid != self.search_id:  # mientras se lanzaba el hilo se escribió otra cosa
-                    return
-                from ..core import genres, ytsearch
-                if kind == "genre":
-                    # solo canciones nuevas: lo que ya está descargado no ocupa sitio en los 100
-                    skip_ids, skip_songs = genres.known_from_library(include_queue=False)
-                    label, tracks = genres.select_tracks(
-                        q, 100, skip_ids=skip_ids, skip_songs=skip_songs)
-                    self._tag_results(tracks, label)
-                    self.q.put(("results", sid, tracks, kind, q, True))
-                    return
-                # Primero una sola página (una petición): resultados visibles cuanto antes.
-                tracks = self._tag_results(ytsearch.search_songs(q, SEARCH_FIRST_PAGE), None)
-                if sid != self.search_id:
-                    return
-                if len(tracks) < SEARCH_FIRST_PAGE or SEARCH_LIMIT <= SEARCH_FIRST_PAGE:
-                    self.q.put(("results", sid, tracks, kind, q, True))
-                    return
-                self.q.put(("results", sid, tracks, kind, q, False))
-                if sid != self.search_id:
-                    return
-                full = self._tag_results(ytsearch.search_songs(q, SEARCH_LIMIT), None)
-                self.q.put(("results", sid, full, kind, q, True))
-            except Exception as exc:  # noqa: BLE001 - sin internet, etc.
-                _log.failure(log, f"búsqueda fallida ({kind}: {q!r})", exc)
-                self.q.put(("remote_error", sid, str(exc)))
-            finally:
-                if marker is not None and self._remote_inflight is marker:
-                    self._remote_inflight = None
-
-        threading.Thread(target=work, daemon=True, name="buscar-youtube").start()
-
-    def _search_genres(self) -> None:
-        names = list(self.yt_sel)
-        if not names:
-            return
-        self.searching = True
-        self.status.configure(text=f"Buscando {', '.join(names)} en YouTube…")
-        self.search_id += 1
-        sid = self.search_id
-
-        def work() -> None:
-            try:
-                from ..core import genres
-                per = max(10, math.ceil(100 / len(names)))
-                skip_ids, skip_songs = genres.known_from_library(include_queue=False)
-                with ThreadPoolExecutor(3) as ex:
-                    results = list(ex.map(lambda g: (g, genres.select_tracks(
-                        g, per, skip_ids=skip_ids, skip_songs=skip_songs)[1]), names))
-                lists = [self._tag_results(tr, g) for g, tr in results]
-                mixed, seen = [], set()
-                for batch in itertools.zip_longest(*lists):  # intercala los géneros
-                    for t in batch:
-                        if t and t["video_id"] not in seen:
-                            seen.add(t["video_id"])
-                            mixed.append(t)
-                self.q.put(("results", sid, mixed, "genres", ""))
-            except Exception as exc:  # noqa: BLE001
-                _log.failure(log, f"búsqueda por géneros fallida ({names})", exc)
-                self.q.put(("remote_error", sid, str(exc)))
-
-        threading.Thread(target=work, daemon=True).start()
-
     # ---------- descargas / borrado ----------
     def download_selected(self) -> None:
         self.download_tracks(self._selected())
@@ -2548,11 +2345,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self.dl.start_download(redownload)
             self._set_state(track["video_id"], "en cola")
         self.status.configure(text=f"Reintentando {len(picks)} archivo(s) incompleto(s)")
-
-
-
-
-
 
     def open_queue(self) -> None:
         """Abre la página de la cola de descargas."""
@@ -2629,62 +2421,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
                   if browser else "Cookies de YouTube desactivadas."))
         if browser:
             self._cookies_dialog_shown = True
-
-    def import_loaded(self, label: str, tracks: list[dict], source: str | None = None) -> None:
-        """Muestra lo importado en la biblioteca y encola solo las canciones nuevas. Con
-        `source` (una playlist de YouTube), la guarda además como lista propia y la abre."""
-        if source and self._import_as_playlist(label, tracks, source):
-            return
-        with self._navigating():
-            self._hide_page()
-            self.close_views()
-            self._show_imported(label, tracks)
-
-    def _import_as_playlist(self, label: str, tracks: list[dict], source: str) -> bool:
-        """Guarda la playlist importada en «Tus listas» (o completa la que ya se importó) y la
-        abre. False si no se pudo: entonces se enseña como una importación normal."""
-        try:
-            pid, added, created = playlists_store.import_list(label, source, tracks)
-        except Exception as exc:  # noqa: BLE001 - la importación sigue, sin lista
-            _log.failure(log, "no se pudo guardar la playlist importada como lista", exc)
-            self.toast.show(f"No se pudo guardar «{label}» en tus listas")
-            return False
-        new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
-        if new:
-            self.dl.submit(new, None)
-        self._select_playlist(pid)
-        self.refresh_view()  # si ya estaba abierta, _select_playlist no la repinta
-        name = self._playlist_name(pid) or label
-        downloading = f", {len(new)} en descarga" if new else ""
-        if created:
-            n = len(tracks)
-            self.toast.show(f"Lista «{name}» guardada en tus listas: "
-                            f"{n} {'canción' if n == 1 else 'canciones'}{downloading}")
-        elif added:
-            self.toast.show(f"«{name}» ya estaba en tus listas: "
-                            f"{added} {'canción nueva' if added == 1 else 'canciones nuevas'}"
-                            f"{downloading}")
-        else:
-            self.toast.show(f"«{name}» ya estaba en tus listas y no hay canciones nuevas")
-        return True
-
-    def _show_imported(self, label: str, tracks: list[dict]) -> None:
-        new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
-        self.view_kind = "all"
-        self.genre_filter = set()
-        self.yt_sel = []
-        self.sel_keys = {("all", None)}
-        known = {t["video_id"] for t in tracks}
-        self.remote = tracks + [t for t in self.remote if t["video_id"] not in known]
-        self.remote_src, self.remote_q = "import", ""
-        self._build_sidebar()
-        self.refresh_view()
-        self._fade_rows()
-        if new:
-            self.dl.submit(new, None)
-            self.status.configure(text=f"{label}: {len(new)} canciones en descarga")
-        else:
-            self.status.configure(text=f"{label}: ya estaban todas en tu biblioteca")
 
     # ---------- páginas integradas ----------
     def _ensure_page(self, name: str):
@@ -2872,7 +2608,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         """El servicio de descargas (None mientras arranca); lo usa el panel de la cola."""
         return self.dl.service
 
-
     def _queue_paused_changed(self, paused: bool) -> None:
         # visible aunque la página esté cerrada
         self.dl_paused = paused
@@ -2912,8 +2647,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
                 fut.add_done_callback(lambda f, v=vid: f.exception() or self.q.put(("resolved", v)))
             else:
                 self._prepare(vid)
-
-
 
     def _prepare_targets(self) -> set[str]:
         """Canciones que probablemente se reproducirán ya: la fila elegida y las dos siguientes."""
@@ -3105,39 +2838,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         finally:
             m.grab_release()
 
-    def enqueue(self, tracks: list[dict], front: bool = False) -> None:
-        if not tracks:
-            return
-        before = list(self.pq.up_next)
-        if front:
-            self.pq.up_next[0:0] = tracks
-        else:
-            self.pq.up_next.extend(tracks)
-        self._refresh_queue()
-        one = len(tracks) == 1
-        what = f"«{tracks[0]['title']}»" if one else f"{len(tracks)} canciones"
-        if front:
-            where = "sonará a continuación" if one else "sonarán a continuación"
-        else:
-            where = "añadida a la cola" if one else "añadidas a la cola"
-        self.toast.show(f"{what} {where}", "Deshacer",
-                        on_action=lambda: self._restore_up_next(before))
-
-    def clear_queue(self) -> None:
-        before = list(self.pq.up_next)
-        if not before:
-            return
-        self.pq.up_next.clear()
-        self._refresh_queue()
-        self.toast.show(f"Cola vaciada ({len(before)})", "Deshacer",
-                        on_action=lambda: self._restore_up_next(before))
-
-    def _restore_up_next(self, tracks: list[dict]) -> None:
-        self.pq.up_next[:] = tracks
-        self._refresh_queue()
-        self._prefetch_next()
-
-    # ---------- reproducción ----------
+    # ---------- reproducción desde la lista ----------
     def _on_double(self, e=None) -> None:
         if (e is not None and str(e.type) == "ButtonPress"
                 and self._tree_column(e.x) in ("#0", "state")):
@@ -3145,167 +2846,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         sel = self._sel_rows()
         if sel:
             self.play_index(sel[0])
-
-
-    def play_index(self, i: int) -> None:
-        """Empieza a reproducir la lista visible desde la fila i."""
-        if not 0 <= i < len(self.rows):
-            return
-        if self.sub_view is not None and self.sub_view["kind"] == "album":  # en su orden
-            self.play_tracks(self.rows, i)
-            return
-        if self._in_playlist():  # una lista suena en su orden (y luego sigue la cola automática)
-            self.play_tracks(self.rows, i, label=f"Lista «{self._view_title()}»")
-            return
-        t = self.rows[i]
-        self.pq.album = False
-        self._play_from = self._view_title()
-        rows, first = self.rows, i
-        if self.raw[2] is not None:  # en «Inicio», la lista es la estantería de esa canción
-            start, end, title = home.section_of(self.sections, len(self.rows), i)
-            rows, first = self.rows[start:end], i - start
-            self._play_from = f"Inicio · {title}"
-        if self.autoplay:  # cola automática inspirada en esta primera canción
-            self.pq.ctx, self.pq.auto_ctx = [t], True
-            self.pq.make_order(0)
-            self._seed(t)
-        else:
-            self.pq.ctx, self.pq.auto_ctx = list(rows), False
-            self.pq.make_order(first)
-        self._play_track(t)
-
-    def play_tracks(self, tracks: list[dict], first: int = 0, label: str | None = None) -> None:
-        """Reproduce una lista concreta (un álbum) en su orden. Con la cola automática activa,
-        al llegar a la última pista se piden canciones similares para seguir sin silencio."""
-        if not 0 <= first < len(tracks):
-            return
-        self._play_from = label or f"Álbum «{tracks[first].get('album') or 'sin título'}»"
-        self.pq.ctx, self.pq.auto_ctx = list(tracks), False
-        self.pq.album = True
-        self.pq.make_order(first)
-        self._play_track(self.pq.ctx[first])
-
-    def _continue_after_album(self, t: dict) -> None:
-        """Suena la última pista del álbum: la cola automática toma el relevo desde ella."""
-        pq = self.pq
-        if not (pq.album and self.autoplay and pq.repeat == 0 and not pq.auto_ctx
-                and pq.order and pq.opos >= len(pq.order) - 1):
-            return
-        pq.album = False
-        pq.auto_ctx = True
-        album = {x["video_id"] for x in pq.ctx}
-        self._seed(t)
-        pq.played |= album  # lo que ya sonó del álbum no vuelve en las similares
-
-    # ---------- cola automática ----------
-    def _genre_of(self, t: dict) -> str | None:
-        return t.get("genre") or t.get("_genre") or (self.lib_by_id.get(t["video_id"]) or {}).get("genre")
-
-    def _seed(self, t: dict) -> None:
-        """Empieza una cola automática a partir de `t`."""
-        self.pq.played = {t["video_id"]}
-        self.seed_token += 1
-        self.seed_genre = self._genre_of(t)
-        self.queue_why = {}
-        self.topping = False
-        if self.online:
-            self._fetch_radio(t)
-        else:
-            self._fill_backup()
-
-    def _fetch_radio(self, t: dict) -> None:
-        """Pide a YT Music canciones similares a `t` y las añade al final de la cola."""
-        if self.topping:
-            return
-        self.topping, token = True, self.seed_token
-        self.radio_seed = t
-
-        def work() -> None:
-            try:
-                from ..core import ytsearch
-                self.q.put(("radio", token, ytsearch.radio_tracks(t["video_id"], 25)))
-            except Exception as exc:  # noqa: BLE001 - sin internet, corte de red, API cambiada
-                _log.failure(log, f"no se pudieron pedir canciones similares a {t['video_id']}", exc)
-                self.q.put(("radio_err", token, str(exc)))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _append_ctx(self, tracks: list[dict]) -> None:
-        self.pq.append(tracks)
-        self._refresh_queue()
-
-    def _on_radio(self, token: int, tracks: list[dict]) -> None:
-        self.topping = False
-        if token != self.seed_token or not self.pq.auto_ctx:
-            return
-        have = {x["video_id"] for x in self.pq.ctx} | self.pq.played
-        seed = self.radio_seed or {}
-        reason = f"similar a {seed.get('artist') or seed.get('title') or 'la semilla'}"
-        new = []
-        for x in tracks:
-            if x["video_id"] in have:
-                continue
-            x["_genre"] = self.seed_genre  # lo que se guarde por el respaldo cae en el mismo género
-            new.append(self.lib_by_id.get(x["video_id"], x))  # si ya la tienes, suena desde el disco
-            self.queue_why[x["video_id"]] = reason
-        if new:
-            self._append_ctx(new)
-            self.status.configure(text=f"Cola automática: {len(new)} canciones similares")
-            self._prefetch_next()
-            self.dl.download_ahead()
-        else:
-            self._fill_backup()
-
-    def _on_radio_error(self, token: int, error: str) -> None:
-        self.topping = False
-        if token == self.seed_token and self.pq.auto_ctx:
-            self._fill_backup()
-            self.status.configure(text="No se pudo pedir canciones similares: cola de respaldo")
-
-    def _fill_backup(self, n: int = 15) -> None:
-        """Añade canciones de tu biblioteca: mismo género primero, otros géneros solo si no alcanzan."""
-        if not (self.autoplay and self.pq.auto_ctx):
-            return
-        from ..core import autoqueue
-        cur = self.pq.current(self.playing_vid)
-        genre = (self._genre_of(cur) if cur else None) or self.seed_genre
-        exclude = {x["video_id"] for x in self.pq.ctx} | self.pq.played
-        tracks = autoqueue.backup_queue(
-            self.library, genre, exclude, n,
-            energy=self._track_energy, target_energy=self._track_energy(cur) if cur else None)
-        if tracks:
-            for track in tracks:
-                self.queue_why[track["video_id"]] = autoqueue.reason_for(track, genre)
-            self._append_ctx(tracks)
-            same = sum(1 for x in tracks if (x.get("genre") or "").lower() == (genre or "").lower())
-            self.status.configure(text=f"Cola de respaldo: {len(tracks)} canciones "
-                                       f"({same} de {genre or 'sin género'})")
-
-
-    def _top_up(self) -> None:
-        """Mantiene unas cuantas canciones por delante: similares con internet, respaldo sin él."""
-        if not (self.autoplay and self.pq.auto_ctx) or self.pq.playable_ahead() >= 6:
-            return
-        cur = self.pq.current(self.playing_vid)
-        if self.online and cur:
-            self._fetch_radio(cur)
-        elif not self.online:
-            self._fill_backup()
-
-    def toggle_auto(self) -> None:
-        self.autoplay = not self.autoplay
-        if self.autoplay and not self.pq.auto_ctx and self.playing_vid:
-            cur = self.pq.current(self.playing_vid)
-            if cur:  # convierte lo que suena en la semilla de una cola automática
-                self.pq.ctx, self.pq.auto_ctx = [cur], True
-                self.pq.album = False
-                self.pq.make_order(0)
-                self._seed(cur)
-        elif not self.autoplay:
-            self.pq.auto_ctx = False
-        self._refresh_toggles()
-        self.save_prefs()
-        self.status.configure(text="Cola automática " + ("activada" if self.autoplay else "desactivada"))
 
     # ---------- conexión ----------
     def _net_loop(self) -> None:
@@ -3332,56 +2872,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self._top_up()
             self.dl.download_ahead()
         self._refresh_queue()
-
-    # ---------- panel «A continuación» ----------
-    def _show_queue(self) -> None:
-        """Abre o cierra el panel, que entra deslizándose por la derecha."""
-        if self.now_open:  # con la vista en grande, la cola es una de sus pestañas
-            view = self.now_view
-            view.show_tab("album" if view.tab == "queue" else "queue")
-            return
-        opening = self.queue_win is None
-        self.queue_win = self.drawer if opening else None
-        self.queue_lb = (self.drawer_list if opening and self.drawer_mode == "queue"
-                         else None)
-        self.btn_queue.set_on(opening)
-        start, to = self._drawer_x, 0 if opening else int(DRAWER_W * self.k)
-        self.drawer.lift()
-        if opening:
-            self._set_drawer_mode(self.drawer_mode)
-            if self.drawer_mode == "lyrics":
-                self.lyrics_view.text.focus_set()
-            else:
-                self.drawer_list.focus_set()
-
-        def step(p: float) -> None:
-            self._drawer_x = int(start + (to - start) * p)
-            self.drawer.place_configure(x=self._drawer_x)
-
-        self.anim.tween("drawer", 260 if opening else 190, step)
-
-    def _set_drawer_mode(self, mode: str) -> None:
-        """Alterna el panel entre la cola y la letra, sin cerrarlo."""
-        self.drawer_mode = "lyrics" if mode == "lyrics" else "queue"
-        self.queue_lb = self.drawer_list if self.drawer_mode == "queue" else None
-        if self.drawer_mode == "lyrics":
-            self.drawer_list.pack_forget()
-            self.drawer_hint.pack_forget()
-            self.lyrics_view.pack(fill="both", expand=True, padx=int(4 * self.k),
-                                  pady=(0, int(4 * self.k)))
-            self.drawer_title.configure(text="Letra")
-            self.drawer_sub.configure(
-                text="Sincronizada con la canción" if self.lyrics_enabled
-                else "Actívala en Ajustes › Reproducción")
-            self._load_lyrics(self.cur_track)
-            self._sync_lyrics(force=True)
-        else:
-            self.lyrics_view.pack_forget()
-            self.drawer_hint.pack(fill="x", padx=int(16 * self.k), pady=(0, int(8 * self.k)))
-            self.drawer_list.pack(fill="both", expand=True, padx=int(4 * self.k))
-            self.drawer_title.configure(text="A continuación")
-            self._refresh_queue()
-        self._style_drawer_tabs(self.scheme.get("accent", self.pal["accent"]))
 
     # ---------- letras ----------
     def _lyrics_wanted(self) -> bool:
@@ -3469,158 +2959,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.status.configure(text="Letras " + ("activadas" if self.lyrics_enabled
                                                 else "desactivadas"))
 
-    def _refresh_queue(self) -> None:
-        if self.now_open:
-            self._now_queue()
-        lb = self.queue_lb
-        if self.queue_win is None or lb is None:
-            return
-        p = self.pal
-        items: list[dict] = []
-        self.queue_map = []
-
-        def header(text: str) -> None:
-            items.append(dict(text=text, hdr=True))
-            self.queue_map.append(("hdr", 0))
-
-        def add(t: dict, kind: str, idx: int, **extra) -> None:
-            item = dict(text=f"{t['title']} — {t['artist']}", **extra)
-            why = self.queue_why.get(t["video_id"]) if kind == "ctx" and self.pq.auto_ctx else None
-            if why:
-                item["sub"] = why
-            if kind in ("up", "ctx"):  # solo lo que queda por delante se puede arrastrar
-                item["move"] = kind
-            items.append(item)
-            self.queue_map.append((kind, idx))
-
-        cur = self.pq.current(self.playing_vid)
-        if cur:
-            header("Sonando ahora")
-            add(cur, "cur", 0, color=self.scheme["accent"])
-        # lo que pusiste tú va aparte de lo que llega solo (similares o respaldo)
-        if self.pq.up_next:
-            header(f"Añadidas por ti · {len(self.pq.up_next)}")
-            for i, t in enumerate(self.pq.up_next):
-                add(t, "up", i, right="＋")
-        upcoming = list(range(self.pq.opos + 1, len(self.pq.order)))
-        if upcoming:
-            header("Siguen automáticamente" if self.pq.auto_ctx else "Siguen en la lista")
-            for j in upcoming:
-                t = self.pq.ctx[self.pq.order[j]]
-                remote = self._is_remote(t)
-                add(t, "ctx", j, right="☁" if remote else "",
-                    color=p["faint"] if remote and not self.online else None)
-        lb.sel.clear()
-        lb.set_items(items)
-        kind = "Cola automática" if self.pq.auto_ctx else "De la lista"
-        queued = list(self.pq.up_next) + [self.pq.ctx[self.pq.order[j]] for j in upcoming]
-        total = sum((t.get("duration") or 0) for t in queued)
-        if queued:
-            if total >= 3600:
-                length = f"{int(total) // 3600} h {int(total) % 3600 // 60} min"
-            else:
-                length = fmt(total)
-            summary = f"{len(queued)} canciones · {length}"
-        else:
-            summary = "nada en cola"
-        self.drawer_sub.configure(
-            text=f"{kind} · {'en línea' if self.online else 'sin conexión'} · {summary}")
-
-    def _queue_jump(self, _e=None) -> None:
-        sel = self.queue_lb.curselection() if self.queue_lb else ()
-        if sel:
-            self._queue_jump_at(sel[0])
-
-    def _queue_jump_at(self, item: int) -> None:
-        if 0 <= item < len(self.queue_map):
-            self._play_queue_entry(*self.queue_map[item])
-
-    def _play_queue_entry(self, kind: str, idx: int) -> None:
-        """Salta a una canción de la cola: una añadida por ti o una de la lista que sigue."""
-        if kind == "up":
-            track = self.pq.take_up_next(idx)
-            if track is not None:
-                self._play_track(track)
-        elif kind == "ctx":
-            self.pq.opos = idx
-            self._play_track(self.pq.ctx[self.pq.order[idx]])
-
-    # ---------- edición de la cola ----------
-    def _queue_move(self, src: int, dst: int) -> None:
-        """Mueve una fila dentro de su sección; `dst` es la posición de inserción."""
-        if not 0 <= src < len(self.queue_map):
-            return
-        kind, idx = self.queue_map[src]
-        if kind == "up":
-            if dst in (idx, idx + 1):
-                return  # se suelta donde estaba
-            track = self.pq.take_up_next(idx)
-            if track is None:
-                return
-            self.pq.insert_up_next(dst - 1 if dst > idx else dst, track)
-        elif kind == "ctx":
-            positions = [v for k, v in self.queue_map if k == "ctx"]
-            target = positions[dst] if dst < len(positions) else len(self.pq.order)
-            if target in (idx, idx + 1):
-                return
-            track = self.pq.take_upcoming(idx)
-            if track is None:
-                return
-            self.pq.insert_upcoming(target - 1 if target > idx else target, track)
-        else:
-            return
-        self._refresh_queue()
-        self._prefetch_next()
-        self.dl.download_ahead()
-
-    def _queue_remove(self, item: int | None = None) -> str | None:
-        """Quita de la cola la fila elegida (o la seleccionada, con Supr)."""
-        if item is None:
-            sel = self.queue_lb.curselection() if self.queue_lb else ()
-            if not sel:
-                return None
-            item = sel[0]
-        if not 0 <= item < len(self.queue_map):
-            return None
-        kind, idx = self.queue_map[item]
-        if kind == "up":
-            track = self.pq.take_up_next(idx)
-        elif kind == "ctx":
-            track = self.pq.take_upcoming(idx)
-        else:
-            return None
-        if track is None:
-            return None
-
-        def undo() -> None:
-            if kind == "up":
-                self.pq.insert_up_next(idx, track)
-            else:
-                self.pq.insert_upcoming(idx, track)
-            self._refresh_queue()
-            self._prefetch_next()
-
-        self.toast.show(f"«{track['title']}» quitada de la cola", "Deshacer", on_action=undo)
-        self._refresh_queue()
-        self._prefetch_next()
-        return "break"
-
-    def _queue_context(self, item: int, x: int, y: int) -> None:
-        if not 0 <= item < len(self.queue_map):
-            return
-        kind, _idx = self.queue_map[item]
-        if kind not in ("up", "ctx"):
-            return
-        m = self._menu(self.drawer_list)
-        m.add_command(label="Reproducir ahora",
-                      command=lambda: self._queue_jump_at(item))
-        m.add_command(label="Quitar de la cola",
-                      command=lambda: self._queue_remove(item))
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
-
+    # ---------- reproducción: cargar, sonar, volumen y pasos ----------
     def _play_track(self, t: dict, how: str = "manual") -> None:
         """`how`: "auto" = fin natural (mezcla con la que suena), "manual" = la pediste tú
         (fundido corto), "cut" = sin fundido de salida."""
@@ -3970,283 +3309,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         finally:
             self.after(400, self._tick)
 
-    # ---------- listas de reproducción ----------
-    def _in_playlist(self) -> bool:
-        """¿Se está viendo una lista (sin búsqueda ni página encima)?"""
-        return (self.view_kind == "playlist" and self.playlist_id is not None
-                and self.sub_view is None and not self.query.get().strip())
-
-    def _can_reorder(self) -> bool:
-        """Subir y bajar solo tienen sentido viendo la lista en su orden, sin filtros."""
-        return self._in_playlist() and self.sort is None and self.decade is None
-
-    def _playlist_name(self, pid: int | None) -> str:
-        return next((pl["name"] for pl in self.playlists if pl["id"] == pid), "")
-
-    def _playlist_rows(self, pid: int | None) -> list[dict]:
-        """Las canciones de una lista; las descargadas, con los datos de la biblioteca."""
-        if pid is None:
-            return []
-        try:
-            stored = playlists_store.tracks(pid)
-        except Exception as exc:  # noqa: BLE001 - una lista ilegible se ve vacía, no rompe nada
-            _log.failure(log, f"no se pudo leer la lista {pid}", exc)
-            return []
-        return [self.lib_by_id.get(t["video_id"]) or t for t in stored
-                if t["video_id"] not in self._hidden]
-
-    def _playlist_status(self, rows: list[dict]) -> str:
-        if not rows:
-            return ""
-        n = len(rows)
-        minutes = round(sum(t.get("duration") or 0 for t in rows) / 60)
-        parts = [f"{n} {'canción' if n == 1 else 'canciones'}"]
-        if minutes:
-            parts.append(f"{minutes // 60} h {minutes % 60} min" if minutes >= 60
-                         else f"{minutes} min")
-        missing = sum(1 for t in rows if t["video_id"] not in self.lib_by_id)
-        if missing:
-            parts.append(f"{missing} sin descargar")
-        return "  ·  ".join(parts)
-
-    def _playlist_menu(self, parent, tracks: list[dict]) -> tk.Menu:
-        """Submenú «Añadir a lista»: tus listas (✓ si ya tienen todo) y «Nueva lista…»."""
-        menu = self._menu(parent)
-        try:
-            inside = playlists_store.containing([t["video_id"] for t in tracks])
-        except Exception:  # noqa: BLE001 - solo es la marca
-            inside = set()
-        for pl in self.playlists:
-            menu.add_command(label=pl["name"] + ("  ✓" if pl["id"] in inside else ""),
-                             command=lambda pid=pl["id"]: self.add_to_playlist(pid, tracks))
-        if self.playlists:
-            menu.add_separator()
-        menu.add_command(label="Nueva lista…", command=lambda: self.new_playlist(tracks))
-        return menu
-
-    def _playlist_index(self, pid: int) -> int | None:
-        return next((i for i, (kind, n, _l) in enumerate(self.side_items)
-                     if kind == "pl" and n == pid), None)
-
-    def _select_playlist(self, pid: int) -> None:
-        """Abre la lista como si se hubiera pulsado en el lateral."""
-        if "lists" in self._side_folded:  # plegada, la lista nueva no estaría a la vista
-            self._side_folded.discard("lists")
-            self.save_prefs()
-        self._build_sidebar()
-        index = self._playlist_index(pid)
-        if index is None:
-            return
-        self.genres.selection_clear()
-        self.genres.selection_set(index)
-        self.genres.see(index)
-        self._pick_genre()
-
-    def new_playlist(self, tracks: list[dict] | None = None) -> None:
-        """Crea una lista y deja escribir su nombre ahí mismo, en el lateral. Con `tracks`
-        (desde «Añadir a lista → Nueva lista…»), la lista nace con ellas y la vista no cambia."""
-        try:
-            pid = playlists_store.create(playlists_store.unique_name())
-            if tracks:
-                playlists_store.add(pid, tracks)
-        except Exception as exc:  # noqa: BLE001 - se avisa y la ventana sigue
-            _log.failure(log, "no se pudo crear la lista", exc)
-            self.toast.show("No se pudo crear la lista")
-            return
-        if tracks:
-            self._build_sidebar()
-            n = len(tracks)
-            self.toast.show(f"{n} {'canción añadida' if n == 1 else 'canciones añadidas'} "
-                            "a la lista nueva")
-        else:
-            self._select_playlist(pid)
-        self.after_idle(lambda: self.rename_playlist(pid))
-
-    def rename_playlist(self, pid: int) -> None:
-        """Un campo de texto sobre la fila de la lista: Intro guarda, Esc deja el nombre."""
-        index = self._playlist_index(pid)
-        if index is None:
-            return
-        side, k, p = self.genres, self.k, self.pal
-        y, h = side.pos[index]
-        if y < side.off or y + h > side.off + side.winfo_height():
-            side._apply_scroll(y - side.winfo_height() / 3)
-        old = self._playlist_name(pid)
-        entry = tk.Entry(side, font=self.fonts["body"], relief="flat", bd=0, bg=p["raised"],
-                         fg=p["fg"], insertbackground=p["fg"], selectbackground=p["sel"],
-                         selectforeground=p["fg"], highlightthickness=max(1, int(k)),
-                         highlightcolor=self.scheme.get("accent", p["accent"]),
-                         highlightbackground=p["line"])
-        entry.insert(0, old)
-        entry.select_range(0, "end")
-        entry.icursor("end")
-        entry.place(x=int(6 * k), y=int(y - side.off + 2 * k), height=h - int(4 * k),
-                    width=max(int(60 * k), side.winfo_width() - int(12 * k)))
-        finished = []
-
-        def finish(save: bool) -> None:
-            if finished:
-                return
-            finished.append(True)
-            name = entry.get().strip()
-            entry.destroy()
-            if save and name and name != old:
-                playlists_store.rename(pid, name)
-            self._build_sidebar()
-            if self.view_kind == "playlist" and self.playlist_id == pid and self.active_page is None:
-                self.header.set_title(self._view_title())
-            (self.grid if self.view_mode == "grid" else self.tree).focus_set()
-
-        entry.bind("<Return>", lambda e: (finish(True), "break")[1])
-        entry.bind("<KP_Enter>", lambda e: (finish(True), "break")[1])
-        entry.bind("<Escape>", lambda e: (finish(False), "break")[1])
-        entry.bind("<FocusOut>", lambda e: finish(True))
-        entry.focus_set()
-
-    def add_to_playlist(self, pid: int, tracks: list[dict]) -> None:
-        name = self._playlist_name(pid)
-        try:
-            present = {t["video_id"] for t in playlists_store.tracks(pid)}
-            new = [t for t in tracks if t["video_id"] not in present]
-            playlists_store.add(pid, new)
-        except Exception as exc:  # noqa: BLE001
-            _log.failure(log, "no se pudo añadir a la lista", exc)
-            self.toast.show(f"No se pudo añadir a «{name}»")
-            return
-        self._build_sidebar()
-        if self._in_playlist() and self.playlist_id == pid:
-            self.refresh_view()
-        if not new:
-            self.toast.show(f"Ya {'estaba' if len(tracks) == 1 else 'estaban'} en «{name}»")
-            return
-        what = f"«{new[0]['title']}»" if len(new) == 1 else f"{len(new)} canciones"
-        vids = [t["video_id"] for t in new]
-        self.toast.show(f"{what} {'añadida' if len(new) == 1 else 'añadidas'} a «{name}»",
-                        "Deshacer", on_action=lambda: self._undo_playlist_add(pid, vids))
-
-    def _undo_playlist_add(self, pid: int, vids: list[str]) -> None:
-        playlists_store.remove(pid, vids)
-        self._build_sidebar()
-        if self._in_playlist() and self.playlist_id == pid:
-            self.refresh_view()
-
-    def remove_from_playlist(self) -> None:
-        """Quita lo seleccionado de la lista abierta (con «Deshacer»); el archivo no se toca."""
-        pid, picks = self.playlist_id, self._selected()
-        if pid is None or not picks:
-            return
-        before = [t["video_id"] for t in playlists_store.tracks(pid)]
-        playlists_store.remove(pid, [t["video_id"] for t in picks])
-        self.tree.selection_remove(*self.tree.selection())
-        self._build_sidebar()
-        self.refresh_view()
-        what = f"«{picks[0]['title']}»" if len(picks) == 1 else f"{len(picks)} canciones"
-        self.toast.show(f"{what} {'quitada' if len(picks) == 1 else 'quitadas'} de "
-                        f"«{self._playlist_name(pid)}»", "Deshacer",
-                        on_action=lambda: self._undo_playlist_remove(pid, picks, before))
-
-    def _undo_playlist_remove(self, pid: int, picks: list[dict], before: list[str]) -> None:
-        playlists_store.add(pid, picks)
-        playlists_store.reorder(pid, before)
-        self._build_sidebar()
-        if self._in_playlist() and self.playlist_id == pid:
-            self.refresh_view()
-            self._reselect([t["video_id"] for t in picks])
-
-    def _reselect(self, vids: list[str]) -> None:
-        iids = [self.vid_iid[vid] for vid in vids if vid in self.vid_iid]
-        if not iids:
-            return
-        self.tree.selection_set(iids)
-        self._on_select()
-        if self.view_mode == "grid":
-            self.grid.see_row(int(iids[0]))
-        else:
-            self.tree.see(iids[0])
-
-    def move_in_playlist(self, delta: int) -> None:
-        """Sube (-1) o baja (+1) un puesto las canciones elegidas."""
-        if not self._can_reorder():
-            return
-        picked = [t["video_id"] for t in self._selected()]
-        order = [t["video_id"] for t in self.rows]
-        new = playlists_store.moved(order, set(picked), delta)
-        if new == order:
-            return
-        playlists_store.reorder(self.playlist_id, new)
-        self.refresh_view()
-        self._reselect(picked)
-
-    def _move_key(self, delta: int) -> str | None:
-        if not self._can_reorder():
-            return None
-        self.move_in_playlist(delta)
-        return "break"
-
-    def _play_playlist(self, pid: int) -> None:
-        rows = self._playlist_rows(pid)
-        if rows:
-            self.play_tracks(rows, 0, label=f"Lista «{self._playlist_name(pid)}»")
-        else:
-            self.toast.show("La lista está vacía")
-
-    def delete_playlist(self, pid: int) -> None:
-        """Borra la lista (no las canciones); «Deshacer» la recupera con todo."""
-        name = self._playlist_name(pid)
-        try:
-            tracks = playlists_store.tracks(pid)
-            playlists_store.delete(pid)
-        except Exception as exc:  # noqa: BLE001
-            _log.failure(log, "no se pudo eliminar la lista", exc)
-            self.toast.show(f"No se pudo eliminar «{name}»")
-            return
-        self.nav.forget(lambda place: ("pl", pid) in place.section)
-        if self.view_kind == "playlist" and self.playlist_id == pid:
-            self.go_home()
-        else:
-            self._build_sidebar()
-        self._sync_nav()
-        self.toast.show(f"Lista «{name}» eliminada", "Deshacer",
-                        on_action=lambda: self._restore_playlist(name, tracks))
-
-    def _restore_playlist(self, name: str, tracks: list[dict]) -> None:
-        pid = playlists_store.create(name)
-        playlists_store.add(pid, tracks)
-        self._select_playlist(pid)
-
-    def export_playlist(self, pid: int) -> None:
-        name = self._playlist_name(pid) or "lista"
-        dest = filedialog.asksaveasfilename(
-            parent=self, title=f"Exportar «{name}»", defaultextension=".m3u",
-            initialfile=re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .") + ".m3u",
-            filetypes=[("Lista M3U", "*.m3u"), ("Todos los archivos", "*.*")])
-        if not dest:
-            return
-        try:
-            count = library.export_m3u(Path(dest), tracks=self._playlist_rows(pid))
-        except OSError as exc:
-            self.toast.show(f"No se pudo exportar: {exc.strerror or exc}")
-            return
-        self.toast.show(f"{count} canciones exportadas a {Path(dest).name}")
-
-    def _side_context(self, i: int, x_root: int, y_root: int) -> None:
-        """Clic derecho en el lateral: las acciones de una lista."""
-        if not 0 <= i < len(self.side_items):
-            return
-        kind, pid, _label = self.side_items[i]
-        if kind != "pl":
-            return
-        m = self._menu()
-        m.add_command(label="Reproducir", command=lambda: self._play_playlist(pid))
-        m.add_command(label="Renombrar", command=lambda: self.rename_playlist(pid))
-        m.add_command(label="Exportar a M3U…", command=lambda: self.export_playlist(pid))
-        m.add_separator()
-        m.add_command(label="Eliminar lista", command=lambda: self.delete_playlist(pid))
-        try:
-            m.tk_popup(x_root, y_root)
-        finally:
-            m.grab_release()
-
     # ---------- pantalla «Reproduciendo» (la canción en grande) ----------
     @property
     def now_open(self) -> bool:
@@ -4318,12 +3380,6 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self.fullscreen = False
         if self.now_view is not None:
             self.now_view.set_fullscreen(self.fullscreen)
-
-    def _focus_search(self, _e=None) -> str:
-        """Ctrl+F: el buscador queda tapado por la vista en grande; primero se cierra."""
-        self.close_now_view()
-        self.entry.focus_set()
-        return "break"
 
     def _now_track(self) -> None:
         t = self.cur_track

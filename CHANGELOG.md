@@ -81,6 +81,10 @@
   unos segundos y vuelve a abrirse solo, con la cola donde estaba y respetando «Iniciar con
   Windows». Funciona a partir de esta versión (quien tenga la 1.3.0 la instala a mano una vez).
 
+### Arreglado
+- Al borrar la lista que se estaba viendo, seguía apareciendo en el lateral hasta el siguiente
+  cambio de vista.
+
 ## 1.3.0 — 2026-11-14
 
 ### Arreglado

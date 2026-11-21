@@ -230,6 +230,9 @@ app/
   ui/
     main.py         ventana (coordina las piezas)
     events.py       bucle de eventos de hilos y descargas
+    search.py       buscador: biblioteca, pre-resultados y YouTube Music
+    playlists_ui.py «Tus listas» e importar playlists como lista
+    up_next.py      «A continuación»: la cola y la cola automática
     navigation.py   Atrás y Adelante
     hero.py         cabecera con portada de álbumes, artistas y listas
     drag.py         arrastrar y soltar canciones
