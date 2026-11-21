@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     added_at TEXT DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (playlist_id, video_id)
 );
+CREATE TABLE IF NOT EXISTS radio_favorites (
+    uuid TEXT PRIMARY KEY,  -- identificador de la emisora en Radio Browser
+    station TEXT NOT NULL,  -- la emisora en JSON: nombre, dirección, logo, país…
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE INDEX IF NOT EXISTS playlist_tracks_order ON playlist_tracks (playlist_id, position);
 CREATE INDEX IF NOT EXISTS plays_by_video ON plays (video_id);
 CREATE INDEX IF NOT EXISTS plays_by_time ON plays (played_at);
@@ -80,7 +85,7 @@ CREATE INDEX IF NOT EXISTS tracks_by_genre ON tracks (genre COLLATE NOCASE);
 """
 
 QUEUE_FIELDS = ("video_id", "title", "artist", "album", "duration", "cover", "genre")
-SCHEMA_VERSION = 5  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
+SCHEMA_VERSION = 6  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
 # Columnas añadidas después de la primera versión: se agregan a bases de datos ya existentes.
 _ADDED_COLUMNS = {
     # track_no: posición en su álbum; se pide a YouTube Music la primera vez que se abre el álbum

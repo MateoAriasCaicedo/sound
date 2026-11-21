@@ -61,7 +61,11 @@ class MiniPlayer(tk.Toplevel):
     def sync(self) -> None:
         app = self.app
         t = app.cur_track
-        self.now.set(t["title"] if t else "Sound", (t.get("artist") or "") if t else "")
+        if t is None and app.radio_station is not None:  # una emisora en directo
+            from ..core.radio import short_name
+            self.now.set(short_name(app.radio_station), "En directo")
+        else:
+            self.now.set(t["title"] if t else "Sound", (t.get("artist") or "") if t else "")
         self.now.set_liked(app.now.liked)
         self.btn_play.set_playing(app.btn_play.playing)
         self.restyle()

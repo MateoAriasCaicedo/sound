@@ -49,6 +49,19 @@
   primera. Con la ventana baja, deja fuera primero la nota de dónde se guardan las canciones,
   luego los géneros y, si hay portadas, las tarjetas.
 
+### Radio
+- **Radio en directo**: «Radio» en el lateral abre emisoras de todo el mundo del directorio libre
+  Radio Browser. Empieza por las de tu país (según la región de Windows; en Colombia, Caracol,
+  Olímpica, Blu, La X…), con listas a un clic (más escuchadas del mundo, noticias, pop, rock,
+  salsa, vallenato, reggaetón, clásica, jazz) y un buscador por nombre, ciudad o género.
+- Un clic en una emisora la pone a sonar en el mismo reproductor: la barra dice su nombre y
+  «En directo · 12:34» en lugar del tiempo, su logo tiñe la ventana, ⏮ ⏭ (y las teclas
+  multimedia) pasan a la emisora anterior o siguiente, y pausa corta la conexión (play vuelve al
+  directo). Si se corta, se reconecta sola; si no responde, avisa con «Reintentar».
+- **Emisoras favoritas** con el corazón de la tarjeta o de la barra; salen primero al abrir la
+  radio. El temporizador para dormir también apaga la radio.
+- La radio no cuenta en el historial ni toca tu cola de canciones, y no se graba ni se descarga.
+
 ### Reproducción
 - **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al
   cabo de 15, 30 o 45 minutos, 1 hora u hora y media, o **al terminar la canción**. Lleva los

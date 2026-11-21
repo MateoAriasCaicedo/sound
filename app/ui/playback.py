@@ -197,6 +197,8 @@ class PlaybackMixin:
             self.after(FADE_TICK_MS, self._fade_tick)
 
     def _maybe_transition(self) -> None:
+        if self.radio_station is not None:  # en directo no hay mezcla con la siguiente
+            return
         p = self.player
         if not p.loaded or p.paused or self.seeking:
             return

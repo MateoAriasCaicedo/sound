@@ -213,6 +213,16 @@ def _moon(d, w):
     _line(d, _arc(x2, y2, r2, toward + 180 - inner, toward + 180 + inner), w)
 
 
+def _radio(d, w):
+    """Un aparato de radio: caja, altavoz, dial y antena."""
+    d.rounded_rectangle((3.5 * SS, 9 * SS, 20.5 * SS, 20 * SS), radius=2.4 * SS,
+                        outline=255, width=w)
+    _line(d, _arc(15.5, 14.5, 2.6, 0, 360), w)
+    _line(d, [(6.5, 12.8), (10.5, 12.8)], w)
+    _line(d, [(6.5, 16.2), (10.5, 16.2)], w)
+    _line(d, [(7, 9), (16.5, 4)], w)
+
+
 def _heart_points() -> list:
     """Contorno clásico de corazón, escalado a la retícula de 24."""
     def point(t):
@@ -238,7 +248,8 @@ _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=
               more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list,
               heart=_heart, heart_fill=_heart_fill, mini=_mini, expand=_expand,
               shrink=_shrink, stage=_stage, chevron_down=_chevron_down,
-              chevron_left=_chevron_left, chevron_right=_chevron_right, moon=_moon)
+              chevron_left=_chevron_left, chevron_right=_chevron_right, moon=_moon,
+              radio=_radio)
 
 
 def names() -> list[str]:

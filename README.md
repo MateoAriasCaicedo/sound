@@ -131,6 +131,9 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Poco espacio en disco**: si quedan menos de 2 GB, las descargas pasan a una a la vez; por
   debajo de 500 MB se pausan y se avisa. Se reanudan solas al liberar espacio.
 - **Diagnóstico**: en Descargas, con comprobaciones del entorno y accesos a datos y registro.
+- **Radio**: emisoras en directo de todo el mundo (directorio libre Radio Browser), empezando
+  por las de tu país, con buscador, listas por género y favoritas. Suenan en el mismo
+  reproductor, con ⏮ ⏭ para cambiar de emisora; no se graban ni se descargan.
 - **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al
   cabo de un rato (de 15 minutos a hora y media) o al terminar la canción, con un fundido suave.
   Se pausa, así que play sigue donde estaba.
@@ -152,7 +155,7 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 |---|---|---|
 | `%LOCALAPPDATA%\Sound\` | `SOUND_DATA_DIR` | Carpeta de datos |
 | `Music\Sound\` en tu carpeta de usuario | `SOUND_MUSIC_DIR` | Canciones (`por-genero/<género>/`, `sueltas/`) |
-| `library.db` | `SOUND_DB` | Biblioteca, cola, historial y Me gusta (SQLite, WAL) |
+| `library.db` | `SOUND_DB` | Biblioteca, cola, historial, Me gusta, listas y emisoras favoritas (SQLite, WAL) |
 | `genres_cache.json` | `SOUND_GENRE_CACHE` | Géneros de YouTube Music en caché |
 | `discover.json` | — | Sugerencias de «Descubre en YouTube» de la última vez |
 | `sound.log` | `SOUND_LOG` | Registro de errores (rota a 512 KB, 2 copias) |
@@ -222,6 +225,7 @@ app/
     ytsearch.py     búsqueda y metadatos de YouTube Music
     app_update.py   versiones nuevas de Sound (GitHub) y su instalador
     discover.py     «Descubre en YouTube»: semillas, mezcla y caché
+    radio.py        emisoras de Radio Browser y favoritas
     importer.py     álbumes, playlists, artistas y canciones
     genres.py       selección por género
     autogenre.py    clasificación con iTunes
@@ -246,6 +250,8 @@ app/
     sleep_timer.py  temporizador para dormir
     welcome.py      bienvenida con la biblioteca vacía
     discover.py     «Descubre en YouTube» en Inicio y la bienvenida
+    radio.py        modo radio del reproductor (en directo)
+    radio_page.py   página «Radio»: emisoras, buscador y favoritas
     page.py         base de las páginas integradas
     playqueue.py    cola de reproducción
     downloads.py    puente con el servicio de descargas

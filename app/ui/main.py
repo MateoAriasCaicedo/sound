@@ -45,6 +45,7 @@ from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
 from .playlists_ui import PlaylistsMixin
 from .playqueue import PlayQueue
+from .radio import RadioMixin
 from .search import SearchMixin
 from .sleep_timer import SleepTimerMixin
 from .theme import (
@@ -116,7 +117,8 @@ DUPES_CHECK_MS = 8000  # tras arrancar, se buscan canciones repetidas para ofrec
 
 
 class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMixin,
-          SleepTimerMixin, WelcomeMixin, DiscoverMixin, PlaylistsMixin, SearchMixin, UpNextMixin,
+          SleepTimerMixin, WelcomeMixin, DiscoverMixin, RadioMixin, PlaylistsMixin, SearchMixin,
+          UpNextMixin,
           LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
@@ -220,6 +222,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self._init_chrome()  # tema (Como Windows, claro u oscuro) y barra de arriba (chrome.py)
         self._init_sleep()   # temporizador para dormir (sleep_timer.py)
         self._init_discover()  # «Descubre en YouTube» en Inicio (discover.py)
+        self._init_radio()     # emisoras en directo (radio.py y radio_page.py)
         # secciones del lateral plegadas: «lists», «genres», «yt»
         self._side_folded = {str(n) for n in self.prefs.get("side_folded") or []}
         # al importar una playlist de YouTube, guardarla también como lista propia
@@ -1321,8 +1324,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             g = t["genre"] or "Sin género"
             counts[g] = counts.get(g, 0) + 1
         items = [("home", None, "Inicio"), ("all", None, "Todo"), ("liked", None, "Me gusta"),
-                 ("recent", None, "Recientes"), ("top", None, "Más escuchado")]
-        rights = ["", str(len(self.library)), str(len(self.liked)), "", ""]
+                 ("recent", None, "Recientes"), ("top", None, "Más escuchado"),
+                 ("radio", None, "Radio")]
+        rights = ["", str(len(self.library)), str(len(self.liked)), "", "", ""]
         # tus listas, con su botón para crear otra
         try:
             self.playlists = playlists_store.all_playlists()
@@ -1395,6 +1399,11 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         """El lateral marca la sección que se ve; con una página abierta (Ajustes…), ninguna."""
         self.genres.selection_clear()
         if self.active_page is not None:
+            if self.active_page is self.pages.get("radio"):  # la página de la radio sí se marca
+                index = next((i for i, (k, _n, _l) in enumerate(self.side_items)
+                              if k == "radio"), None)
+                if index is not None:
+                    self.genres.selection_set(index)
             return
         for i, (k, n, _l) in enumerate(self.side_items):
             if (k, n) in self.sel_keys:
@@ -1411,6 +1420,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             return
         if any(s[0] == "newpl" for s in sel):
             self.new_playlist()
+            return
+        if any(s[0] == "radio" for s in sel):  # la radio es una página, no una vista de canciones
+            self.open_radio()
             return
         if not sel:
             return
@@ -2107,12 +2119,21 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self._refresh_now_heart(pop=states[cur])
 
     def like_current(self) -> None:
-        """El corazón del reproductor: marca o desmarca la canción que suena."""
+        """El corazón del reproductor: marca o desmarca la canción que suena (o, con la radio,
+        la emisora como favorita)."""
+        if self.radio_on:
+            self.toggle_station_favorite(self.radio_station)
+            return
         if self.cur_track:
             self.toggle_like([self.cur_track])
 
     def _refresh_now_heart(self, pop: bool = False) -> None:
-        """Corazón junto al título: solo si la canción que suena está en la biblioteca."""
+        """Corazón junto al título: solo si la canción que suena está en la biblioteca (con la
+        radio, si la emisora es favorita)."""
+        if self.radio_on:
+            self.now.set_liked(self.radio_station["uuid"] in self.radio_favs, pop=pop)
+            self.now.set_artist_link(False)
+            return
         t = self.cur_track
         if t is None or t["video_id"] not in self.lib_by_id:
             self.now.set_liked(None)
@@ -2446,6 +2467,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         elif name == "settings":
             from .settings_page import SettingsPage
             page = SettingsPage(self)
+        elif name == "radio":
+            from .radio_page import RadioPage
+            page = RadioPage(self)
         else:
             raise KeyError(name)
         self.pages[name] = page
@@ -2971,6 +2995,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.play_token += 1
         token = self.play_token
         vid = t["video_id"]
+        self._leave_radio()  # una canción saca del modo radio (el fundido corta la emisora)
         if how == "manual":
             self._sleep_wake()  # la pediste tú: ya no se está apagando
         self.resume_track = None
@@ -3207,6 +3232,10 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         return "break"
 
     def play_pause(self) -> None:
+        if self.radio_on:  # pausa corta la emisora; play vuelve al directo
+            self._sleep_wake()
+            self._radio_toggle()
+            return
         if self._sleep_wake():  # el temporizador paró al acabar la canción: sigue la siguiente
             self.step(1)
             return
@@ -3226,6 +3255,10 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.btn_play.configure(text="▶" if self.player.paused else "⏸")
 
     def step(self, d: int, auto: bool = False) -> None:
+        if self.radio_on:  # ⏮ ⏭ cambian de emisora; en directo no hay «siguiente» automático
+            if not auto:
+                self._radio_step(d)
+            return
         if auto and self._sleep_stops_queue():  # temporizador para dormir: aquí se para
             return
         how = "auto" if auto else "manual"
@@ -3297,6 +3330,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
 
     def _seek_release(self, _e) -> None:
         self.seeking = False
+        if self.radio_on:  # en directo no se adelanta
+            self.scale.set(0)
+            return
         if self.player.loaded and self.player.length:
             ms = self.scale.get() / 1000 * self.player.length
             self.player.seek(ms)
@@ -3322,6 +3358,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
     def toggle_now_view(self) -> None:
         if self.now_open:
             self.close_now_view()
+        elif self.radio_on:
+            self.status.configure(text="La vista en grande es para canciones; la radio suena "
+                                       "en directo")
         else:
             self.open_now_view()
 
@@ -3629,7 +3668,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             if self.player.loaded:
                 sm.set_playing(not self.player.paused)
                 self._timeline_tick = (self._timeline_tick + 1) % 5
-                if self._timeline_tick == 0 and self.player.length:
+                if self._timeline_tick == 0 and self.player.length and not self.radio_on:
                     sm.set_timeline(self.player.position(), self.player.length)
             else:
                 sm.set_playing(False if self.cur_track is not None else None)
@@ -3680,6 +3719,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
     def _tick_once(self) -> None:
         now = time.monotonic()
         delta, self._tick_at = now - self._tick_at, now
+        if self._radio_tick():  # una emisora: ni progreso, ni historial, ni siguiente canción
+            return
         if self.player.loaded:
             try:
                 self.player.check()
@@ -3793,7 +3834,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
                 img = Image.open(io.BytesIO(data)).convert("RGB")
             except Exception as exc:  # noqa: BLE001 - imagen corrupta: se usa el degradado
                 _log.failure(log, "portada ilegible", exc)
-        seed = self.cur_track["video_id"] if self.cur_track else None
+        seed = self.cur_track["video_id"] if self.cur_track else (
+            f"radio-{self.radio_station['uuid']}" if self.radio_on else None)
         self.cover.show(img, seed)
         self._cover_img = (img, seed)
         if self.mini is not None:
@@ -3802,6 +3844,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self._cover_color = color
         if self.cur_track is not None:
             self._system_media_track(self.cur_track, data)
+        elif self.radio_on:
+            self._system_media_track(self._radio_media(), data)
         if self.now_view is not None:
             self.now_view.set_art(img, seed, color)
         self._set_ambient(color)

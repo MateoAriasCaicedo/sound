@@ -94,7 +94,7 @@ class SleepTimerMixin:
             menu.add_radiobutton(label=choice_label(minutes), value=str(minutes),
                                  variable=self._sleep_var,
                                  command=lambda m=minutes: self.set_sleep_timer(m))
-        if self.player.loaded or self.sleep_mode == "track":
+        if (self.player.loaded and not self.radio_on) or self.sleep_mode == "track":
             menu.add_radiobutton(label="Al terminar la canción", value="track",
                                  variable=self._sleep_var, command=self.sleep_after_track)
         if self.sleep_mode:

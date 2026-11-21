@@ -49,6 +49,11 @@ def _store(video_id: str, data: bytes | None) -> None:
         _log.failure(log, f"no se pudo guardar la portada de {video_id}", exc)
 
 
+def store(video_id: str, data: bytes | None) -> None:
+    """Guarda una imagen en la caché (p. ej. el logo de una emisora)."""
+    _store(video_id, data)
+
+
 def _embedded(path: str | Path | None) -> bytes | None:
     """Carátula incrustada en el archivo local (MP4/M4A), si la tiene."""
     if not path:

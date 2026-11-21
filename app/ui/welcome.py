@@ -147,7 +147,8 @@ class ActionCard(tk.Canvas):
 
 
 def _disc(d: int, fill: str, glyph: str, kind: str) -> Image.Image:
-    """Botón redondo: ▶ («play»), ↓ («download») o ✓ («done»), sobremuestreado."""
+    """Botón redondo: ▶ («play»), ↓ («download»), ✓ («done») o un corazón («heart», vacío;
+    «heart_on», lleno), sobremuestreado."""
     ss = 4
     img = Image.new("RGBA", (d * ss, d * ss), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -161,20 +162,24 @@ def _disc(d: int, fill: str, glyph: str, kind: str) -> Image.Image:
         draw.line([(c - d * ss * 0.2, c), (c - d * ss * 0.05, c + d * ss * 0.15),
                    (c + d * ss * 0.22, c - d * ss * 0.15)], fill=glyph, width=w, joint="curve")
     small = img.resize((d, d), Image.LANCZOS)
-    if kind == "download":
-        mask = icon_mask("downloads", int(d * 0.62), 1.8)
+    icon = {"download": "downloads", "heart": "heart", "heart_on": "heart_fill"}.get(kind)
+    if icon:
+        mask = icon_mask(icon, int(d * 0.62), 1.8)
         small.alpha_composite(_layer(mask, glyph), ((d - mask.width) // 2, (d - mask.height) // 2))
     return small
 
 
 class SuggestionTile(tk.Canvas):
     """Portada de una canción sugerida: un clic (o Intro) la reproduce; al pasar el ratón salen
-    ▶ y, arriba a la derecha, ↓ para descargarla."""
+    ▶ y, arriba a la derecha, ↓ para descargarla (`on_corner`).
 
-    def __init__(self, master, anim, k: float, fonts, on_play, on_download) -> None:
+    Las emisoras de la radio usan la misma tarjeta (radio_page.StationTile): cambian el dibujo
+    de la portada, el botón de la esquina (un corazón) y la línea de debajo."""
+
+    def __init__(self, master, anim, k: float, fonts, on_play, on_corner) -> None:
         super().__init__(master, highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
         self.anim, self.k, self.fonts = anim, k, fonts
-        self.on_play, self.on_download = on_play, on_download
+        self.on_play, self.on_corner = on_play, on_corner
         self.track: dict | None = None
         self.image: Image.Image | None = None
         self.queued = False
@@ -241,8 +246,8 @@ class SuggestionTile(tk.Canvas):
         if self.track is None or not inside:
             return
         if self.over_dl:
-            if not self.queued:
-                self.on_download(self.track)
+            if self.corner_active():
+                self.on_corner(self.track)
         else:
             self._play()
 
@@ -263,20 +268,43 @@ class SuggestionTile(tk.Canvas):
         self.focused = on
         self._render()
 
-    # ---------- pintar ----------
-    def _cover(self) -> Image.Image:
-        side, k, c = self.side, self.k, self.c
+    # ---------- lo que cambia en cada tipo de tarjeta ----------
+    def corner_kind(self) -> str:
+        return "done" if self.queued else "download"
+
+    def corner_active(self) -> bool:
+        return not self.queued  # ya en descarga: la esquina no hace nada
+
+    def subtitle(self) -> tuple[str, str]:
+        """(texto, color) de la línea bajo el título."""
+        return ("En descarga" if self.queued else (self.track or {}).get("artist") or "", "dim")
+
+    def placeholder_icon(self) -> str:
+        return "note"
+
+    def art(self, side: int) -> Image.Image:
+        """La portada, cuadrada, sin redondear ni botones."""
         if self.image is not None:
             if self._scaled is None or self._scaled[0] != side:
                 self._scaled = (side, self.image.convert("RGB").resize((side, side), Image.LANCZOS))
-            art = self._scaled[1].convert("RGBA")
-        else:  # mientras llega la portada (o si no hay), un color propio y una nota
-            seed = (self.track or {}).get("video_id") or ""
-            base = blend(c["bg"], seed_color(seed), 0.35) if seed else blend(c["bg"], c["fg"], 0.07)
-            art = Image.new("RGBA", (side, side), base)
-            note = icon_mask("note", int(side * 0.22))
-            art.alpha_composite(_layer(note, blend(base, c["fg"], 0.35)),
-                                ((side - note.width) // 2, (side - note.height) // 2))
+            return self._scaled[1].convert("RGBA")
+        return self.placeholder(side)
+
+    def placeholder(self, side: int) -> Image.Image:
+        """Mientras llega la portada (o si no hay): un color propio y un icono."""
+        c = self.c
+        seed = (self.track or {}).get("video_id") or ""
+        base = blend(c["bg"], seed_color(seed), 0.35) if seed else blend(c["bg"], c["fg"], 0.07)
+        art = Image.new("RGBA", (side, side), base)
+        mark = icon_mask(self.placeholder_icon(), int(side * 0.22))
+        art.alpha_composite(_layer(mark, blend(base, c["fg"], 0.35)),
+                            ((side - mark.width) // 2, (side - mark.height) // 2))
+        return art
+
+    # ---------- pintar ----------
+    def _cover(self) -> Image.Image:
+        side, k, c = self.side, self.k, self.c
+        art = self.art(side)
         lift = max(self.h, 0.6 if self.focused else 0.0)
         if lift and self.track is not None:
             art.alpha_composite(Image.new("RGBA", (side, side), (0, 0, 0, int(70 * lift))))
@@ -288,7 +316,7 @@ class SuggestionTile(tk.Canvas):
             x, y, dd = self._dl_box()
             fill = c["accent"] if self.over_dl else "#202020"
             glyph = c["on_accent"] if self.over_dl else "#ffffff"
-            dl = _disc(dd, fill, glyph, "done" if self.queued else "download")
+            dl = _disc(dd, fill, glyph, self.corner_kind())
             dl.putalpha(dl.getchannel("A").point(lambda a: int(a * lift * 0.92)))
             art.alpha_composite(dl, (x, y))
         out = Image.new("RGBA", (side, side), (0, 0, 0, 0))
@@ -312,8 +340,8 @@ class SuggestionTile(tk.Canvas):
         self.create_text(0, y, anchor="nw", font=f["body"], fill=c["fg"],
                          text=elide(f["body"], self.track.get("title") or "", side))
         y += f["body"].metrics("linespace")
-        note = "En descarga" if self.queued else (self.track.get("artist") or "")
-        self.create_text(0, y, anchor="nw", font=f["small"], fill=c["dim"],
+        note, color = self.subtitle()
+        self.create_text(0, y, anchor="nw", font=f["small"], fill=c[color],
                          text=elide(f["small"], note, side))
 
 

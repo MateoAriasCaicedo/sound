@@ -4,7 +4,8 @@ Sound funciona en el equipo del usuario. No tiene cuentas, telemetría ni servid
 
 ## Qué se guarda en el equipo
 
-- Biblioteca, cola, historial y «Me gusta»: `%LOCALAPPDATA%\Sound\library.db`.
+- Biblioteca, cola, historial, «Me gusta», listas y emisoras favoritas:
+  `%LOCALAPPDATA%\Sound\library.db`.
 - Preferencias y sesión de reproducción: `ui_prefs.json` y `ui_session.json` en la misma carpeta.
 - Canciones y carátulas: `%USERPROFILE%\Music\Sound`.
 - Formas de onda, volumen medido, letras consultadas y registro de errores:
@@ -25,6 +26,11 @@ mensajes de error técnicos. No contiene cookies ni contraseñas.
 - **GitHub**: si el aviso de versiones nuevas está activado, una vez al día se consulta la lista
   pública de versiones de Sound; al actualizar, el instalador se descarga de GitHub. No se envía
   nada del usuario.
+- **Radio Browser** (radio-browser.info): al abrir «Radio» se piden las emisoras de tu país
+  (el código de la región de Windows, p. ej. «CO»), la lista o el género elegidos y lo que
+  escribas en su buscador. Al escuchar una emisora, el equipo se conecta al servidor de esa
+  emisora, y sus logos se descargan de las direcciones que publica cada una, como en cualquier
+  reproductor de radio.
 - **iTunes Search API**: solo cuando una canción llega sin género; se envía el artista y el
   título para intentar clasificarla.
 - **LRCLIB**: solo si el usuario activa las letras. Se envían el título, el artista, el álbum y la

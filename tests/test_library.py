@@ -154,5 +154,20 @@ def test_migration_v5_remembers_where_lists_were_imported_from(tmp_path):
         mine = conn.execute("SELECT name, source FROM playlists").fetchone()
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert "source" in columns and tuple(mine) == ("Mía", None)
-    assert version == library.SCHEMA_VERSION == 5
+    assert version == library.SCHEMA_VERSION
     assert (tmp_path / "v4.v4.bak.db").exists()  # copia antes de migrar
+
+
+def test_migration_v6_adds_radio_favorites_and_keeps_a_backup(tmp_path):
+    old = tmp_path / "v5.db"
+    with closing(sqlite3.connect(old)) as conn, conn:
+        conn.execute("CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     " name TEXT NOT NULL, created_at TEXT, source TEXT)")
+        conn.execute("PRAGMA user_version = 5")
+
+    with closing(library.connect(old)) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert "radio_favorites" in tables
+    assert version == library.SCHEMA_VERSION == 6
+    assert (tmp_path / "v5.v5.bak.db").exists()

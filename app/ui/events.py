@@ -96,6 +96,10 @@ class EventLoopMixin:
                     self._thumbs_pending.discard(ev[1])
                     self.grid.set_cover(ev[1], ev[2])
                     self._welcome_cover(ev[1], ev[2])  # las portadas de la bienvenida
+                elif kind == "radio_logo":  # el logo de una emisora (radio_page.py)
+                    self._radio_cover(ev[1], ev[2])
+                elif kind == "radio_list":  # emisoras pedidas por la página de la radio
+                    self._radio_list_loaded(ev[1], ev[2], ev[3])
                 elif kind == "discover":  # sugerencias de «Descubre en YouTube» (discover.py)
                     self._discover_loaded(ev[1])
                 elif kind == "hero_art":  # portada de la cabecera (hero.py)
