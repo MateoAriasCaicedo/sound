@@ -162,7 +162,8 @@ def _disc(d: int, fill: str, glyph: str, kind: str) -> Image.Image:
         draw.line([(c - d * ss * 0.2, c), (c - d * ss * 0.05, c + d * ss * 0.15),
                    (c + d * ss * 0.22, c - d * ss * 0.15)], fill=glyph, width=w, joint="curve")
     small = img.resize((d, d), Image.LANCZOS)
-    icon = {"download": "downloads", "heart": "heart", "heart_on": "heart_fill"}.get(kind)
+    icon = {"download": "downloads", "heart": "heart", "heart_on": "heart_fill",
+            "radio": "radio"}.get(kind)
     if icon:
         mask = icon_mask(icon, int(d * 0.62), 1.8)
         small.alpha_composite(_layer(mask, glyph), ((d - mask.width) // 2, (d - mask.height) // 2))
@@ -236,7 +237,8 @@ class SuggestionTile(tk.Canvas):
 
     def _motion(self, e) -> None:
         x, y, d = self._dl_box()
-        over = self.track is not None and x <= e.x <= x + d and y <= e.y <= y + d
+        over = (self.track is not None and self.corner_kind() is not None
+                and x <= e.x <= x + d and y <= e.y <= y + d)
         if over != self.over_dl:
             self.over_dl = over
             self._render()
@@ -269,7 +271,8 @@ class SuggestionTile(tk.Canvas):
         self._render()
 
     # ---------- lo que cambia en cada tipo de tarjeta ----------
-    def corner_kind(self) -> str:
+    def corner_kind(self) -> str | None:
+        """El botón de la esquina (None: sin botón)."""
         return "done" if self.queued else "download"
 
     def corner_active(self) -> bool:
@@ -313,12 +316,14 @@ class SuggestionTile(tk.Canvas):
             play = _disc(d, c["accent"], c["on_accent"], "play")
             play.putalpha(play.getchannel("A").point(lambda a: int(a * lift)))
             art.alpha_composite(play, (side - pad - d, side - pad - d))
-            x, y, dd = self._dl_box()
-            fill = c["accent"] if self.over_dl else "#202020"
-            glyph = c["on_accent"] if self.over_dl else "#ffffff"
-            dl = _disc(dd, fill, glyph, self.corner_kind())
-            dl.putalpha(dl.getchannel("A").point(lambda a: int(a * lift * 0.92)))
-            art.alpha_composite(dl, (x, y))
+            kind = self.corner_kind()
+            if kind is not None:
+                x, y, dd = self._dl_box()
+                fill = c["accent"] if self.over_dl else "#202020"
+                glyph = c["on_accent"] if self.over_dl else "#ffffff"
+                dl = _disc(dd, fill, glyph, kind)
+                dl.putalpha(dl.getchannel("A").point(lambda a: int(a * lift * 0.92)))
+                art.alpha_composite(dl, (x, y))
         out = Image.new("RGBA", (side, side), (0, 0, 0, 0))
         out.paste(art, (0, 0), _rounded_mask(side, side, int(8 * k)))
         return out

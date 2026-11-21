@@ -48,6 +48,7 @@ from .playqueue import PlayQueue
 from .radio import RadioMixin
 from .search import SearchMixin
 from .sleep_timer import SleepTimerMixin
+from .stations import StationsMixin
 from .theme import (
     FONT_FAMILY,
     blend,
@@ -117,8 +118,8 @@ DUPES_CHECK_MS = 8000  # tras arrancar, se buscan canciones repetidas para ofrec
 
 
 class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMixin,
-          SleepTimerMixin, WelcomeMixin, DiscoverMixin, RadioMixin, PlaylistsMixin, SearchMixin,
-          UpNextMixin,
+          SleepTimerMixin, WelcomeMixin, DiscoverMixin, RadioMixin, StationsMixin,
+          PlaylistsMixin, SearchMixin, UpNextMixin,
           LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
@@ -223,6 +224,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self._init_sleep()   # temporizador para dormir (sleep_timer.py)
         self._init_discover()  # «Descubre en YouTube» en Inicio (discover.py)
         self._init_radio()     # emisoras en directo (radio.py y radio_page.py)
+        self._init_stations()  # estaciones de Sound: radios sin fin (stations.py)
         # secciones del lateral plegadas: «lists», «genres», «yt»
         self._side_folded = {str(n) for n in self.prefs.get("side_folded") or []}
         # al importar una playlist de YouTube, guardarla también como lista propia
@@ -2812,6 +2814,10 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
                       command=lambda: self.enqueue(self._selected(), front=True))
         m.add_command(label="Añadir a la cola", command=lambda: self.enqueue(self._selected()))
         m.add_cascade(label="Añadir a lista", menu=self._playlist_menu(m, self._selected()))
+        picked = self._selected()
+        seed = album["_tracks"][0] if album is not None else (picked[0] if len(picked) == 1 else None)
+        if seed is not None:  # una radio sin fin que empieza por esta canción
+            m.add_command(label="Iniciar radio", command=lambda: self.start_track_station(seed))
         if self._in_playlist():
             m.add_command(label="Quitar de esta lista", accelerator="Supr",
                           command=self.remove_from_playlist)
@@ -3436,6 +3442,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         if self.cur_track is None:
             return ""
         if self.pq.auto_ctx:
+            if self.station_now is not None:  # una estación de Sound: su nombre
+                return f"{self.station_now['title']} · sin fin"
             seed = self.radio_seed
             return f"Cola automática · similares a «{seed['title']}»" if seed else "Cola automática"
         return self._play_from

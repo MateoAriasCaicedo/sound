@@ -220,6 +220,11 @@ class HeroMixin:
     def hero_more(self) -> None:
         rows = list(self.rows)
         menu = self._menu()
+        station = self._hero_station(rows)
+        if station is not None:  # una radio sin fin de lo que se ve (estaciones de Sound)
+            menu.add_command(label=f"Iniciar «{station['title']}»",
+                             command=lambda: self.start_station(station))
+            menu.add_separator()
         if rows:
             menu.add_command(label="Añadir a la cola", command=lambda: self.enqueue(rows))
             menu.add_cascade(label="Añadir a lista", menu=self._playlist_menu(menu, rows))

@@ -20,9 +20,11 @@ mensajes de error técnicos. No contiene cookies ni contraseñas.
 
 - **YouTube Music / yt-dlp**: búsquedas, metadatos y descargas. Es el funcionamiento normal de la
   aplicación y está sujeto a la política de privacidad de Google.
-  - La **cola automática** y **«Descubre en Inicio»** piden a YouTube Music canciones parecidas
-    a una dada: se envía el identificador de esa canción (la que suena o, en Descubre, hasta tres
-    de las que más escuchas). Las dos se desactivan en Ajustes.
+  - La **cola automática**, las **estaciones de Sound** y **«Descubre en Inicio»** piden a
+    YouTube Music canciones parecidas a una dada: se envía el identificador de esa canción (la
+    que suena, la que empieza la estación o, en Descubre, hasta tres de las que más escuchas).
+    La cola automática y Descubre se desactivan en Ajustes; una estación solo empieza si la
+    eliges.
 - **GitHub**: si el aviso de versiones nuevas está activado, una vez al día se consulta la lista
   pública de versiones de Sound; al actualizar, el instalador se descarga de GitHub. No se envía
   nada del usuario.

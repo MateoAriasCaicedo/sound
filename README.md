@@ -134,6 +134,9 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Radio**: emisoras en directo de todo el mundo (directorio libre Radio Browser), empezando
   por las de tu país, con buscador, listas por género y favoritas. Suenan en el mismo
   reproductor, con ⏮ ⏭ para cambiar de emisora; no se graban ni se descargan.
+- **Estaciones de Sound**: radios sin fin de un artista, una canción, una lista, tus Me gusta o
+  un género. En «Para ti» (página Radio), con «Iniciar radio» en el menú de una canción o en el
+  «⋯» de un artista, álbum o lista.
 - **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al
   cabo de un rato (de 15 minutos a hora y media) o al terminar la canción, con un fundido suave.
   Se pausa, así que play sigue donde estaba.
@@ -226,6 +229,7 @@ app/
     app_update.py   versiones nuevas de Sound (GitHub) y su instalador
     discover.py     «Descubre en YouTube»: semillas, mezcla y caché
     radio.py        emisoras de Radio Browser y favoritas
+    stations.py     estaciones de Sound: cuáles ofrecer y con qué empiezan
     importer.py     álbumes, playlists, artistas y canciones
     genres.py       selección por género
     autogenre.py    clasificación con iTunes
@@ -251,7 +255,8 @@ app/
     welcome.py      bienvenida con la biblioteca vacía
     discover.py     «Descubre en YouTube» en Inicio y la bienvenida
     radio.py        modo radio del reproductor (en directo)
-    radio_page.py   página «Radio»: emisoras, buscador y favoritas
+    radio_page.py   página «Radio»: emisoras, buscador, favoritas y «Para ti»
+    stations.py     estaciones de Sound: radios sin fin que no dependen de la cola automática
     page.py         base de las páginas integradas
     playqueue.py    cola de reproducción
     downloads.py    puente con el servicio de descargas

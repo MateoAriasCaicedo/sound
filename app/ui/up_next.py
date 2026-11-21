@@ -60,6 +60,7 @@ class UpNextMixin:
         """Empieza a reproducir la lista visible desde la fila i."""
         if not 0 <= i < len(self.rows):
             return
+        self._end_station()  # otra cosa para escuchar: la estación de Sound termina
         if self.sub_view is not None and self.sub_view["kind"] == "album":  # en su orden
             self.play_tracks(self.rows, i)
             return
@@ -88,6 +89,7 @@ class UpNextMixin:
         al llegar a la última pista se piden canciones similares para seguir sin silencio."""
         if not 0 <= first < len(tracks):
             return
+        self._end_station()
         self._play_from = label or f"Álbum «{tracks[first].get('album') or 'sin título'}»"
         self.pq.ctx, self.pq.auto_ctx = list(tracks), False
         self.pq.album = True
@@ -160,7 +162,8 @@ class UpNextMixin:
             self.queue_why[x["video_id"]] = reason
         if new:
             self._append_ctx(new)
-            self.status.configure(text=f"Cola automática: {len(new)} canciones similares")
+            source = (self.station_now or {}).get("title") or "Cola automática"
+            self.status.configure(text=f"{source}: {len(new)} canciones parecidas más")
             self._prefetch_next()
             self.dl.download_ahead()
         else:
@@ -174,7 +177,7 @@ class UpNextMixin:
 
     def _fill_backup(self, n: int = 15) -> None:
         """Añade canciones de tu biblioteca: mismo género primero, otros géneros solo si no alcanzan."""
-        if not (self.autoplay and self.pq.auto_ctx):
+        if not self._station_keeps_going():
             return
         from ..core import autoqueue
         cur = self.pq.current(self.playing_vid)
@@ -192,8 +195,9 @@ class UpNextMixin:
                                        f"({same} de {genre or 'sin género'})")
 
     def _top_up(self) -> None:
-        """Mantiene unas cuantas canciones por delante: similares con internet, respaldo sin él."""
-        if not (self.autoplay and self.pq.auto_ctx) or self.pq.playable_ahead() >= 6:
+        """Mantiene unas cuantas canciones por delante: similares con internet, respaldo sin él.
+        Con una estación de Sound sigue aunque la cola automática esté desactivada."""
+        if not self._station_keeps_going() or self.pq.playable_ahead() >= 6:
             return
         cur = self.pq.current(self.playing_vid)
         if self.online and cur:
@@ -212,6 +216,7 @@ class UpNextMixin:
                 self._seed(cur)
         elif not self.autoplay:
             self.pq.auto_ctx = False
+            self._end_station()  # desactivarla también para una estación que sonara
         self._refresh_toggles()
         self.save_prefs()
         self.status.configure(text="Cola automática " + ("activada" if self.autoplay else "desactivada"))
@@ -310,7 +315,7 @@ class UpNextMixin:
                     color=p["faint"] if remote and not self.online else None)
         lb.sel.clear()
         lb.set_items(items)
-        kind = "Cola automática" if self.pq.auto_ctx else "De la lista"
+        kind = ((self.station_now or {}).get("title") or "Cola automática") if self.pq.auto_ctx             else "De la lista"  # con una estación de Sound, su nombre («Radio de Shakira»)
         queued = list(self.pq.up_next) + [self.pq.ctx[self.pq.order[j]] for j in upcoming]
         total = sum((t.get("duration") or 0) for t in queued)
         if queued:

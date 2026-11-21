@@ -61,6 +61,13 @@
 - **Emisoras favoritas** con el corazón de la tarjeta o de la barra; salen primero al abrir la
   radio. El temporizador para dormir también apaga la radio.
 - La radio no cuenta en el historial ni toca tu cola de canciones, y no se graba ni se descarga.
+- **Estaciones de Sound**: radios sin fin hechas con lo que escuchas. «Para ti», en la página
+  Radio, ofrece la radio de tus artistas y canciones más escuchados, la de tus Me gusta y la de
+  tus géneros con más canciones (sin biblioteca todavía, los géneros del lateral). También
+  «Iniciar radio» en el menú de cualquier canción, y en el «⋯» de un artista, un álbum, una
+  lista o Me gusta. Empiezan por esa canción y unas cuantas tuyas parecidas, y siguen con lo
+  que YouTube Music pone en su radio (sin internet, con tu biblioteca), aunque la cola
+  automática esté desactivada. «A continuación» dice de qué estación viene lo que suena.
 
 ### Reproducción
 - **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al

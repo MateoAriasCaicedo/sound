@@ -1,9 +1,10 @@
-"""Página «Radio»: emisoras en directo del directorio libre Radio Browser.
+"""Página «Radio»: emisoras en directo del directorio libre Radio Browser y estaciones de Sound.
 
-Arriba, un buscador (nombre, ciudad o género) y unas listas a un clic: tus favoritas, las de tu
-país (según la región de Windows), las más escuchadas del mundo y algunos géneros. Debajo, las
-emisoras con su logo: un clic la pone a sonar y el corazón la guarda en favoritas. La que suena
-dice «Sonando ahora». El modo radio del reproductor está en radio.py.
+Arriba, un buscador (nombre, ciudad o género) y unas listas a un clic: «Para ti» (las estaciones
+de Sound, radios sin fin hechas con lo que escuchas), tus favoritas, las de tu país (según la
+región de Windows), las más escuchadas del mundo y algunos géneros. Debajo, las emisoras con su
+logo: un clic la pone a sonar y el corazón la guarda en favoritas. La que suena dice «Sonando
+ahora». El modo radio del reproductor está en radio.py; las estaciones, en stations.py.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from ..core import log as _log
 from .page import Page
 from .radio import art_track
 from .theme import FONT_FAMILY, blend, seed_color
-from .welcome import SuggestionTile, fit_count
+from .welcome import SuggestionTile, _disc, fit_count
 from .widgets import ChipBar, Field, bind_touchpad, touchpad_deltas
 
 log = _log.get("ui")
@@ -43,6 +44,9 @@ def tile_columns(width: int, k: float) -> tuple[int, int]:
 
 def list_status(key: str, count: int, label: str) -> str:
     """Lo que dice la página bajo las listas, según qué se ve y cuántas hay."""
+    if key == "mixes":
+        return ("Radios sin fin hechas con lo que escuchas: empiezan por una canción tuya y "
+                "siguen con parecidas de YouTube Music")
     if key == "fav":
         if not count:
             return "Aún no tienes emisoras favoritas: márcalas con el corazón"
@@ -114,6 +118,47 @@ class StationTile(SuggestionTile):
         return self._scaled[1].copy()
 
 
+class MixTile(SuggestionTile):
+    """Una estación de Sound: la portada de la canción con la que empieza, con una marca de
+    radio arriba a la izquierda. Sin botón en la esquina."""
+
+    def __init__(self, master, anim, k: float, fonts, on_play, on_corner) -> None:
+        super().__init__(master, anim, k, fonts, on_play, on_corner)
+        self.item: dict | None = None
+        self.playing = False
+
+    def set_item(self, item: dict, image, playing: bool) -> None:
+        changed = playing != self.playing
+        self.item, self.playing = item, playing
+        seed = item.get("seed") or {}
+        track = self.track if self.track and self.track.get("mix_id") == item["id"] else {
+            "video_id": seed.get("video_id") or item["id"], "title": item["title"],
+            "mix_id": item["id"], "cover": seed.get("cover"), "path": seed.get("path")}
+        before = (self.track, self.image)
+        self.set_track(track, image, False)
+        if changed and before == (self.track, self.image):
+            self._render()
+
+    def corner_kind(self) -> str | None:
+        return None
+
+    def subtitle(self) -> tuple[str, str]:
+        if self.playing:
+            return "Sonando ahora", "accent"
+        return (self.item or {}).get("subtitle") or "", "dim"
+
+    def placeholder_icon(self) -> str:
+        return "radio"
+
+    def art(self, side: int) -> Image.Image:
+        art = super().art(side)
+        d, pad = int(26 * self.k), int(8 * self.k)
+        badge = _disc(d, "#202020", "#ffffff", "radio")
+        badge.putalpha(badge.getchannel("A").point(lambda a: int(a * 0.88)))
+        art.alpha_composite(badge, (pad, pad))
+        return art
+
+
 class RadioPage(Page):
     def __init__(self, app) -> None:
         super().__init__(app, "Radio", status="Emisoras en directo de todo el mundo")
@@ -122,8 +167,9 @@ class RadioPage(Page):
         self.country_label = radio.country_name(self.country) if self.country else ""
         self.key: str | None = None
         self.label = ""
-        self.stations: list[dict] = []
-        self.tiles: list[StationTile] = []
+        self.stations: list[dict] = []  # emisoras o, en «Para ti», estaciones de Sound
+        self.tiles: list[StationTile | MixTile] = []
+        self._mode = "live"  # «live» (emisoras) o «mixes» (estaciones de Sound)
         self._covers: dict[str, Image.Image | None] = {}
         self._asked: set[str] = set()
         self._logos = ThreadPoolExecutor(LOGO_WORKERS, thread_name_prefix="logos")
@@ -178,7 +224,7 @@ class RadioPage(Page):
             self.refresh_state()
 
     def _list_options(self) -> list[tuple[str, str]]:
-        options = []
+        options = [("mixes", "Para ti")]
         if self.app.radio_favs or self.key == "fav":
             options.append(("fav", "Favoritas"))
         if self.country:
@@ -222,6 +268,9 @@ class RadioPage(Page):
         self.key, self.label = key, label
         self._sync_chips()
         self.outer.yview_moveto(0)
+        if key == "mixes":
+            self._show(self.app._station_suggestions())
+            return
         if key == "fav":
             self._show(self.app._radio_favorites())
             return
@@ -260,6 +309,10 @@ class RadioPage(Page):
     # ---------- pintar la lista ----------
     def _show(self, stations: list[dict], text: str | None = None) -> None:
         self.stations = list(stations)
+        if self.key == "mixes":  # la nota del directorio es de las emisoras, no de «Para ti»
+            self.credit.grid_remove()
+        else:
+            self.credit.grid()
         self.info.configure(text=text or list_status(self.key or "", len(stations), self.label))
         self._layout()
 
@@ -269,6 +322,14 @@ class RadioPage(Page):
         cols, side = tile_columns(self._width, self.k)
         self._cols = cols
         gap = int(TILE_GAP * self.k)
+        mode = "mixes" if self.key == "mixes" else "live"
+        if mode != self._mode:  # otro tipo de tarjeta: se rehacen
+            while self.tiles:
+                self.tiles.pop().destroy()
+            self._mode = mode
+        if mode == "mixes":
+            self._layout_mixes(cols, side, gap)
+            return
         while len(self.tiles) < len(self.stations):
             tile = StationTile(self.inner, self.app.anim, self.k, self.fonts, self._play,
                                self._favorite)
@@ -293,6 +354,38 @@ class RadioPage(Page):
         if missing:
             self._ask_covers(missing)
 
+    def _layout_mixes(self, cols: int, side: int, gap: int) -> None:
+        """«Para ti»: las estaciones de Sound, con la portada de su primera canción."""
+        while len(self.tiles) < len(self.stations):
+            tile = MixTile(self.inner, self.app.anim, self.k, self.fonts, self._play_mix,
+                           lambda _t: None)
+            if self._colors:
+                tile.restyle(**self._colors)
+            tile.bind("<MouseWheel>", self._wheel, add="+")
+            bind_touchpad(tile, self._touchpad, add=True)
+            self.tiles.append(tile)
+        while len(self.tiles) > len(self.stations):
+            self.tiles.pop().destroy()
+        now = None if self.app.radio_on else (self.app.station_now or {}).get("id")
+        missing = []
+        for i, (tile, item) in enumerate(zip(self.tiles, self.stations)):
+            tile.grid(row=i // cols, column=i % cols, sticky="nw",
+                      padx=(0 if i % cols == 0 else gap, 0), pady=(0, gap))
+            tile.set_side(side)
+            seed = item.get("seed")
+            vid = seed["video_id"] if seed else None
+            tile.set_item(item, self._covers.get(vid) if vid else None, item["id"] == now)
+            if seed is not None and vid not in self._covers:
+                missing.append(seed)
+        if missing:
+            refused = [t for t in missing if not self.app._request_thumb(t)]
+            if refused and self._cover_retry is None:
+                def retry() -> None:
+                    self._cover_retry = None
+                    if self._mode == "mixes":
+                        self._layout()
+                self._cover_retry = self.after(700, retry)
+
     def _ask_covers(self, stations: list[dict]) -> None:
         """Pide los logos que faltan, en orden (los de arriba antes) y cada uno una sola vez."""
         for station in stations:
@@ -306,15 +399,16 @@ class RadioPage(Page):
         image = None
         try:
             data = covers.cached(vid)
-            if data is None:
+            fresh = data is None
+            if fresh:
                 data = radio.fetch_logo(url)
-                if data:
-                    covers.store(vid, data)
             if data:
                 image = Image.open(io.BytesIO(data))
                 image.load()
                 image = image.convert("RGBA")
                 image.thumbnail((256, 256), Image.LANCZOS)
+                if fresh:  # solo se guarda lo que de verdad es una imagen
+                    covers.store(vid, data)
         except Exception as exc:  # noqa: BLE001 - un logo raro: se dibuja uno propio
             _log.failure(log, f"logo ilegible de la emisora {vid}", exc)
             image = None
@@ -324,10 +418,18 @@ class RadioPage(Page):
         """Llegó un logo (None si no se pudo: no se vuelve a pedir)."""
         if vid in self._covers and self._covers[vid] is image:
             return
+        mine = vid.startswith("radio-") or any(
+            tile.track and tile.track.get("video_id") == vid for tile in self.tiles)
+        if not mine or (image is None and not vid.startswith("radio-")):
+            return  # portadas de la lista principal, o una que no llegó (se reintentará)
         self._covers[vid] = image
         for tile in self.tiles:
-            if tile.track and tile.track.get("video_id") == vid and tile.station:
+            if not (tile.track and tile.track.get("video_id") == vid):
+                continue
+            if isinstance(tile, StationTile) and tile.station:
                 tile.set_station(tile.station, image, tile.favorite, tile.playing)
+            elif isinstance(tile, MixTile) and tile.item:
+                tile.set_item(tile.item, image, tile.playing)
 
     def refresh_state(self, favorites: bool = False) -> None:
         """Cambió la emisora que suena o una favorita: corazones, «Sonando ahora» y, si se ven
@@ -347,6 +449,11 @@ class RadioPage(Page):
         station = self._station_of(track)
         if station is not None:
             self.app.play_station(station, self.stations)
+
+    def _play_mix(self, track: dict) -> None:
+        item = next((s for s in self.stations if s.get("id") == track.get("mix_id")), None)
+        if item is not None:
+            self.app.start_station(item)
 
     def _favorite(self, track: dict) -> None:
         station = self._station_of(track)

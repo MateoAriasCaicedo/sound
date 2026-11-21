@@ -238,7 +238,8 @@ class RadioMixin:
             page.loaded(token, stations, error)
 
     def _radio_cover(self, vid: str, image) -> None:
-        """Desde la cola de eventos: llegó un logo (puede ser de la página de la radio)."""
+        """Desde la cola de eventos: llegó un logo o una portada (puede ser de la página de la
+        radio: los logos de las emisoras y las portadas de las estaciones de Sound)."""
         page = self.pages.get("radio")
-        if page is not None and vid.startswith("radio-"):
+        if page is not None:
             page.set_cover(vid, image)
