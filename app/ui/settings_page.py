@@ -131,6 +131,11 @@ class SettingsPage(Page):
             section, "Vista de la biblioteca",
             "Lista con columnas o cuadrícula con portadas; también Ctrl+Shift+L.",
             [("list", "Lista"), ("grid", "Cuadrícula")], self.set_view)
+        self.btn_discover = self._switch(
+            section, "Descubre en Inicio",
+            "Canciones de YouTube Music que aún no tienes, parecidas a lo que más escuchas. "
+            "Para elegirlas se pide a YouTube Music la radio de esas canciones.",
+            self.toggle_discover)
         self.btn_motion = self._switch(
             section, "Animaciones",
             "Desactívalas si prefieres transiciones instantáneas o usas lector de pantalla.",
@@ -368,6 +373,10 @@ class SettingsPage(Page):
         self.app.toggle_auto()
         self._refresh_labels()
 
+    def toggle_discover(self) -> None:
+        self.app.toggle_discover()
+        self._refresh_labels()
+
     def set_xfade(self, ms: int) -> None:
         self.app.set_xfade(ms)
         self._refresh_labels()
@@ -400,7 +409,7 @@ class SettingsPage(Page):
         if not messagebox.askyesno(
                 "Restaurar ajustes",
                 "Se restauran tema, volumen, orden, repetición, cola automática, transición, "
-                "normalización, letras, animaciones y actualización automática.\n\nLa biblioteca, "
+                "normalización, letras, animaciones, Descubre y actualización automática.\n\nLa biblioteca, "
                 "las cookies y las descargas no se tocan.\n\n¿Continuar?", parent=self):
             return
         app = self.app
@@ -411,6 +420,8 @@ class SettingsPage(Page):
             app.pq.make_order(app.pq.order[app.pq.opos])
         app.pq.repeat = 0
         app.autoplay = True
+        if not app.discover_on:
+            app.toggle_discover()
         app.xfade_ms = 4000
         app.var_normalize.set(False)
         app.normalize = False
@@ -432,6 +443,7 @@ class SettingsPage(Page):
         app = self.app
         self.btn_theme.set(app.theme_mode)
         self.btn_view.set(app.view_pref)
+        self.btn_discover.set(app.discover_on)
         self.btn_motion.set(not app.anim.reduced)
         self.btn_shuffle.set(app.pq.shuffle)
         self.btn_repeat.set(app.pq.repeat)

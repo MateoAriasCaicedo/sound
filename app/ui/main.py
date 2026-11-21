@@ -33,6 +33,7 @@ from .anim import Animator, ease_in_out
 from .app_updates import CHECK_DELAY_MS, AppUpdateMixin
 from .chrome import SYSTEM_POLL_MS, ChromeMixin
 from .cover_grid import CoverGrid, album_key, artist_key, group_albums
+from .discover import DiscoverMixin
 from .downloads import DownloadsController
 from .drag import DragMixin
 from .events import AHEAD_RESULTS, EventLoopMixin
@@ -115,7 +116,7 @@ DUPES_CHECK_MS = 8000  # tras arrancar, se buscan canciones repetidas para ofrec
 
 
 class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMixin,
-          SleepTimerMixin, WelcomeMixin, PlaylistsMixin, SearchMixin, UpNextMixin,
+          SleepTimerMixin, WelcomeMixin, DiscoverMixin, PlaylistsMixin, SearchMixin, UpNextMixin,
           LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
@@ -218,6 +219,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self._crash_shown = False
         self._init_chrome()  # tema (Como Windows, claro u oscuro) y barra de arriba (chrome.py)
         self._init_sleep()   # temporizador para dormir (sleep_timer.py)
+        self._init_discover()  # «Descubre en YouTube» en Inicio (discover.py)
         # secciones del lateral plegadas: «lists», «genres», «yt»
         self._side_folded = {str(n) for n in self.prefs.get("side_folded") or []}
         # al importar una playlist de YouTube, guardarla también como lista propia
@@ -288,6 +290,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.refresh_library()
         self._restore_session()
         self._visited()  # el primer sitio del historial: Inicio
+        self._start_discover()  # lo guardado de Descubre ya; lo nuevo, en unos segundos
         self.waves.sweep((t["video_id"], t["path"]) for t in self.library)
         threading.Thread(target=self._fix_fragmented, daemon=True, name="mp4fix").start()
         self._load_yt_genres()
@@ -1567,7 +1570,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             _log.failure(log, "no se pudo leer el historial para Inicio", exc)
             recent, top, counts, liked = [], [], {}, []
         return home.shelves(self.lib_by_id, recent, top, self.library, liked, counts, per,
-                            seed=datetime.date.today().toordinal())
+                            seed=datetime.date.today().toordinal(),
+                            discover=self._discover_rows())
 
     def _grid_columns(self, cols: int) -> None:
         """La cuadrícula cambió de columnas: las estanterías de «Inicio» se rellenan de nuevo."""
@@ -2870,6 +2874,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         else:
             self.status.configure(text="Conexión recuperada")
             self._top_up()
+            self._discover_online()
             self.dl.download_ahead()
         self._refresh_queue()
 
@@ -3833,6 +3838,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             volume = self._last_volume  # no guardar un 0 accidental al cerrar silenciado
         return {"dark": self.dark, "theme": self.theme_mode,
                 "import_as_playlist": self.import_as_playlist,
+                "discover": self.discover_on,
                 "side_folded": sorted(self._side_folded), "vol": volume, "shuffle": self.pq.shuffle,
                 "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
                 "normalize": self.normalize, "cookies": self.cookies,

@@ -1,4 +1,5 @@
-"""«Inicio»: estanterías con lo que escuchas, lo que más suena y lo nuevo de tu biblioteca.
+"""«Inicio»: estanterías con lo que escuchas, lo que más suena y lo nuevo de tu biblioteca, y
+«Descubre en YouTube» con canciones que aún no tienes (ver core/discover.py).
 
 Funciones puras (sin Tk ni base de datos) para poder probarlas: la ventana les pasa las listas
 ya leídas del historial, de «Me gusta» y de la biblioteca.
@@ -7,6 +8,7 @@ import random
 
 SHELVES = ("Seguir escuchando", "Lo que más escuchas", "Añadidas hace poco", "Tus Me gusta",
            "Todavía sin escuchar")
+DISCOVER = "Descubre en YouTube"
 
 
 def greeting(hour: int) -> str:
@@ -20,13 +22,16 @@ def greeting(hour: int) -> str:
 
 def shelves(by_id: dict[str, dict], recent: list[dict], top: list[dict], library: list[dict],
             liked: list[dict], counts: dict[str, int], per: int,
-            seed: int) -> tuple[list[dict], list[tuple[int, str]]]:
+            seed: int, discover: list[dict] | tuple = ()) -> tuple[list[dict], list[tuple[int, str]]]:
     """Filas de «Inicio» y sus secciones [(primera fila, título)].
 
     Cada estantería lleva como mucho `per` canciones y cada canción sale una sola vez, en la
     primera estantería donde cabe: así no se repite lo mismo cinco veces. Solo entran canciones
     que siguen en la biblioteca (`by_id`), con sus datos actuales. «Todavía sin escuchar» es un
     sorteo que cambia con `seed` (la ventana usa el día: estable durante la jornada).
+
+    `discover` (canciones de YouTube que aún no tienes) va justo después de «Seguir escuchando»:
+    tal cual, sin pasar por la biblioteca, y sin las que ya estén en ella.
     """
     rows: list[dict] = []
     sections: list[tuple[int, str]] = []
@@ -48,6 +53,12 @@ def shelves(by_id: dict[str, dict], recent: list[dict], top: list[dict], library
 
     recent_title, top_title, added_title, liked_title, unheard_title = SHELVES
     shelf(recent_title, recent)
+    new = [t for t in discover if t.get("video_id") and t["video_id"] not in by_id
+           and t["video_id"] not in seen][:per]
+    if new:
+        seen.update(t["video_id"] for t in new)
+        sections.append((len(rows), DISCOVER))
+        rows.extend(new)
     shelf(top_title, top)
     shelf(added_title, sorted(library, key=lambda t: t.get("added_at") or "", reverse=True))
     shelf(liked_title, liked)

@@ -83,9 +83,12 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 
 ## En la ventana
 
-- **La primera vez** (o con la biblioteca vacía), Inicio da la bienvenida con tres maneras de
-  empezar (buscar, importar un enlace o música por frase), los géneros de YouTube y, mientras
-  bajan las primeras canciones, cuántas quedan.
+- **La primera vez** (o con la biblioteca vacía), Inicio da la bienvenida con portadas para
+  escuchar ya, tres maneras de empezar (buscar, importar un enlace o música por frase), los
+  géneros de YouTube y, mientras bajan las primeras canciones, cuántas quedan.
+- **Descubre en YouTube**: en Inicio, canciones que aún no tienes, parecidas a lo que más
+  escuchas (o lo popular, si aún no hay historial). Se escuchan al momento y se descargan con ↓.
+  Se desactiva en Ajustes → Apariencia.
 - **Selección múltiple**: clic, `Ctrl+clic` y `Mayús+clic`; `Ctrl+A` selecciona la vista actual.
 - **Volver al inicio**: un clic en «Sound», arriba a la izquierda, cierra páginas y la cola, limpia
   la búsqueda y vuelve a Inicio.
@@ -151,6 +154,7 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 | `Music\Sound\` en tu carpeta de usuario | `SOUND_MUSIC_DIR` | Canciones (`por-genero/<género>/`, `sueltas/`) |
 | `library.db` | `SOUND_DB` | Biblioteca, cola, historial y Me gusta (SQLite, WAL) |
 | `genres_cache.json` | `SOUND_GENRE_CACHE` | Géneros de YouTube Music en caché |
+| `discover.json` | — | Sugerencias de «Descubre en YouTube» de la última vez |
 | `sound.log` | `SOUND_LOG` | Registro de errores (rota a 512 KB, 2 copias) |
 | `cache\waves\` | `SOUND_WAVE_DIR` | Onda real de cada canción |
 | `cache\lyrics\` | `SOUND_LYRICS_DIR` | Letras consultadas, si se activan |
@@ -217,6 +221,7 @@ app/
     errors.py       traducción de errores de yt-dlp
     ytsearch.py     búsqueda y metadatos de YouTube Music
     app_update.py   versiones nuevas de Sound (GitHub) y su instalador
+    discover.py     «Descubre en YouTube»: semillas, mezcla y caché
     importer.py     álbumes, playlists, artistas y canciones
     genres.py       selección por género
     autogenre.py    clasificación con iTunes
@@ -240,6 +245,7 @@ app/
     app_updates.py  aviso e instalación de versiones nuevas
     sleep_timer.py  temporizador para dormir
     welcome.py      bienvenida con la biblioteca vacía
+    discover.py     «Descubre en YouTube» en Inicio y la bienvenida
     page.py         base de las páginas integradas
     playqueue.py    cola de reproducción
     downloads.py    puente con el servicio de descargas

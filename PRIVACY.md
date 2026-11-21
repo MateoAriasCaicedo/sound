@@ -10,6 +10,7 @@ Sound funciona en el equipo del usuario. No tiene cuentas, telemetría ni servid
 - Formas de onda, volumen medido, letras consultadas y registro de errores:
   `%LOCALAPPDATA%\Sound\cache` y `%LOCALAPPDATA%\Sound\sound.log`. Las letras solo se guardan si
   el usuario activa esa opción.
+- Sugerencias de «Descubre en YouTube» de la última vez: `%LOCALAPPDATA%\Sound\discover.json`.
 
 El registro puede contener rutas de archivos, títulos de canciones, identificadores de vídeo y
 mensajes de error técnicos. No contiene cookies ni contraseñas.
@@ -18,6 +19,12 @@ mensajes de error técnicos. No contiene cookies ni contraseñas.
 
 - **YouTube Music / yt-dlp**: búsquedas, metadatos y descargas. Es el funcionamiento normal de la
   aplicación y está sujeto a la política de privacidad de Google.
+  - La **cola automática** y **«Descubre en Inicio»** piden a YouTube Music canciones parecidas
+    a una dada: se envía el identificador de esa canción (la que suena o, en Descubre, hasta tres
+    de las que más escuchas). Las dos se desactivan en Ajustes.
+- **GitHub**: si el aviso de versiones nuevas está activado, una vez al día se consulta la lista
+  pública de versiones de Sound; al actualizar, el instalador se descarga de GitHub. No se envía
+  nada del usuario.
 - **iTunes Search API**: solo cuando una canción llega sin género; se envía el artista y el
   título para intentar clasificarla.
 - **LRCLIB**: solo si el usuario activa las letras. Se envían el título, el artista, el álbum y la

@@ -95,6 +95,9 @@ class EventLoopMixin:
                 elif kind == "thumb":
                     self._thumbs_pending.discard(ev[1])
                     self.grid.set_cover(ev[1], ev[2])
+                    self._welcome_cover(ev[1], ev[2])  # las portadas de la bienvenida
+                elif kind == "discover":  # sugerencias de «Descubre en YouTube» (discover.py)
+                    self._discover_loaded(ev[1])
                 elif kind == "hero_art":  # portada de la cabecera (hero.py)
                     self._hero_art_loaded(ev[1], ev[2], ev[3])
                 elif kind == "thumb_button":

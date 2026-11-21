@@ -34,13 +34,20 @@
   orden, y la abre (se puede desactivar en Importar). Si ya la habías importado no se duplica:
   se le añaden las canciones nuevas.
 
-### Primera vez
+### Inicio y primera vez
+- **Descubre en YouTube**: Inicio tiene una estantería con canciones que aún no tienes, justo
+  después de «Seguir escuchando». Salen de la «radio» de YouTube Music de tus canciones más
+  escuchadas (tres de artistas distintos, que cambian cada día) o, sin historial, de lo popular
+  de algunos géneros. Nada de lo que ya tienes ni versiones que no sean la original. Se
+  escuchan al momento y se descargan con ↓; lo de la vez anterior se enseña al abrir mientras
+  llega lo nuevo. Se desactiva en Ajustes → Apariencia.
 - **Bienvenida con la biblioteca vacía**: en vez de una tabla vacía con sus columnas, Inicio
-  explica en una frase qué hace Sound y ofrece tres maneras de empezar (buscar, importar un
+  explica en una frase qué hace Sound y ofrece portadas para escuchar ya («Para empezar a
+  escuchar», con «Ver otras» y ↓ para descargar), tres maneras de empezar (buscar, importar un
   enlace o música por frase) y los géneros de YouTube como atajo. Mientras bajan las primeras
   canciones dice cuántas quedan, con un enlace a Descargas, y se va sola cuando llega la
-  primera. Con la ventana baja, deja fuera primero la nota de dónde se guardan las canciones y
-  luego los géneros.
+  primera. Con la ventana baja, deja fuera primero la nota de dónde se guardan las canciones,
+  luego los géneros y, si hay portadas, las tarjetas.
 
 ### Reproducción
 - **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al
