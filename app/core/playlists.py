@@ -31,10 +31,33 @@ def unique_name(base: str = "Nueva lista", db_path: Path | None = None) -> str:
     return f"{base} {n}"
 
 
-def create(name: str, db_path: Path | None = None) -> int:
+def create(name: str, db_path: Path | None = None, source: str | None = None) -> int:
     name = name.strip() or unique_name(db_path=db_path)
     with closing(library.connect(db_path)) as conn, conn:
-        return conn.execute("INSERT INTO playlists (name) VALUES (?)", (name,)).lastrowid
+        return conn.execute("INSERT INTO playlists (name, source) VALUES (?, ?)",
+                            (name, source)).lastrowid
+
+
+def by_source(source: str, db_path: Path | None = None) -> int | None:
+    """La lista que se importó de esa playlist de YouTube, si sigue existiendo."""
+    with closing(library.connect(db_path)) as conn:
+        row = conn.execute("SELECT id FROM playlists WHERE source = ? ORDER BY id LIMIT 1",
+                           (source,)).fetchone()
+    return row["id"] if row else None
+
+
+def import_list(name: str, source: str, items: list[dict],
+                db_path: Path | None = None) -> tuple[int, int, bool]:
+    """Guarda una playlist de YouTube como lista propia, en su orden.
+
+    Si ya se había importado (misma `source`), no se duplica: se le añaden al final las
+    canciones nuevas. Devuelve (id de la lista, canciones añadidas, ¿se creó ahora?).
+    """
+    pid = by_source(source, db_path)
+    created = pid is None
+    if created:
+        pid = create(unique_name(name.strip() or "Lista importada", db_path), db_path, source)
+    return pid, add(pid, items, db_path), created
 
 
 def rename(playlist_id: int, name: str, db_path: Path | None = None) -> bool:

@@ -11,7 +11,7 @@ from ..core import importer
 from ..core import log as _log
 from .page import Page
 from .theme import FONT_FAMILY
-from .widgets import Field, PillButton
+from .widgets import Field, PillButton, Switch
 
 POLL_MS = 100
 LIMIT = 200
@@ -35,7 +35,8 @@ class ImportPage(Page):
 
         b = self.body
         b.columnconfigure(0, weight=1)
-        b.rowconfigure(5, weight=1)
+        b.rowconfigure(6, weight=1)
+        self._source: str | None = None  # la playlist de YouTube del enlace que se importa
         self.bind("<Configure>", self._resized)
 
 
@@ -54,11 +55,26 @@ class ImportPage(Page):
                                  justify="left")
         self.examples.grid(row=3, column=0, sticky="ew", pady=(int(3 * self.k), 0))
 
+        # una playlist de YouTube puede quedarse también como lista propia, en su orden
+        self.save_row = tk.Frame(b)
+        self.save_row.grid(row=4, column=0, sticky="w", pady=(int(14 * self.k), 0))
+        self.save_switch = Switch(self.save_row, self.app.anim, self.k, self._toggle_save)
+        self.save_switch.grid(row=0, column=0, rowspan=2, sticky="n", pady=(int(1 * self.k), 0))
+        self.save_label = tk.Label(self.save_row, anchor="w", font=self.fonts["body"],
+                                   text="Guardar las playlists también en «Tus listas»",
+                                   cursor="hand2")
+        self.save_label.grid(row=0, column=1, sticky="w", padx=(int(10 * self.k), 0))
+        self.save_label.bind("<ButtonRelease-1>", lambda e: self._toggle_save())
+        self.save_hint = tk.Label(self.save_row, anchor="w", font=self.fonts["small"],
+                                  text="Con su nombre y en su orden. Si ya la habías importado, "
+                                       "se le añaden las canciones nuevas.")
+        self.save_hint.grid(row=1, column=1, sticky="w", padx=(int(10 * self.k), 0))
+
         self.status = tk.Label(b, anchor="w", justify="left", font=self.fonts["small"])
-        self.status.grid(row=4, column=0, sticky="ew", pady=(int(10 * self.k), int(8 * self.k)))
+        self.status.grid(row=5, column=0, sticky="ew", pady=(int(10 * self.k), int(8 * self.k)))
 
         self.buttons = tk.Frame(b)
-        self.buttons.grid(row=5, column=0, sticky="new")
+        self.buttons.grid(row=6, column=0, sticky="new")
         self.btn_import = PillButton(self.buttons, self.app.anim, self.k, "Importar",
                                      self.start, self.fonts["body"],
                                      variant="primary", min_width=124)
@@ -93,6 +109,11 @@ class ImportPage(Page):
         self.status.configure(wraplength=wrap)
 
     # ---------- acciones ----------
+    def _toggle_save(self) -> None:
+        self.app.import_as_playlist = not self.app.import_as_playlist
+        self.app.save_prefs()
+        self.save_switch.set(self.app.import_as_playlist)
+
     def paste(self) -> None:
         try:
             text = self.app.clipboard_get().strip()
@@ -116,6 +137,7 @@ class ImportPage(Page):
         if self.worker is not None and self.worker.is_alive():
             return
         self.var_url.set(url)
+        self._source = importer.source_of(url)
         self._set_busy(True)
         self._show_status("Leyendo la lista de YouTube Music…")
 
@@ -161,7 +183,8 @@ class ImportPage(Page):
         self._show_status(f"«{label}»: {len(tracks)} canciones listas.")
         if self.app.active_page is self:
             self.app.close_page()
-        self.app.import_loaded(label, tracks)
+        source = self._source if self.app.import_as_playlist else None
+        self.app.import_loaded(label, tracks, source=source)
 
     def _failed(self, message: str) -> None:
         self._set_busy(False)
@@ -183,10 +206,15 @@ class ImportPage(Page):
 
     def _restyle_content(self) -> None:
         pal = self.app.pal
-        for frame in (self.top, self.buttons):
+        for frame in (self.top, self.buttons, self.save_row):
             frame.configure(bg=pal["bg"])
-        for label in (self.info, self.examples, self.status):
+        for label in (self.info, self.examples, self.status, self.save_label, self.save_hint):
             label.configure(bg=pal["bg"])
+        self.save_label.configure(fg=pal["fg"])
+        self.save_hint.configure(fg=pal["dim"])
+        self.save_switch.restyle(bg=pal["bg"], fg=pal["fg"], dim=pal["dim"], accent=pal["accent"],
+                                 on_accent=pal["accent_fg"])
+        self.save_switch.set(self.app.import_as_playlist, animate=False)
         self.info.configure(fg=pal["dim"])
         self.examples.configure(fg=pal["faint"])
         self.status.configure(fg=pal["danger" if self._status_error else "dim"])

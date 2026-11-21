@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS plays (
 CREATE TABLE IF NOT EXISTS playlists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    source TEXT  -- de dónde se importó ('yt:PL…'): reimportarla la completa en vez de duplicarla
 );
 CREATE TABLE IF NOT EXISTS playlist_tracks (
     playlist_id INTEGER NOT NULL,
@@ -79,12 +80,13 @@ CREATE INDEX IF NOT EXISTS tracks_by_genre ON tracks (genre COLLATE NOCASE);
 """
 
 QUEUE_FIELDS = ("video_id", "title", "artist", "album", "duration", "cover", "genre")
-SCHEMA_VERSION = 4  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
+SCHEMA_VERSION = 5  # súbelo al añadir columnas o tablas: antes se guarda una copia de seguridad
 # Columnas añadidas después de la primera versión: se agregan a bases de datos ya existentes.
 _ADDED_COLUMNS = {
     # track_no: posición en su álbum; se pide a YouTube Music la primera vez que se abre el álbum
     "tracks": {"year": "INTEGER", "has_cover": "INTEGER", "track_no": "INTEGER"},
     "queue": {"priority": "INTEGER NOT NULL DEFAULT 0"},  # más alto se descarga antes
+    "playlists": {"source": "TEXT"},  # playlist de YouTube de la que se importó la lista
 }
 
 

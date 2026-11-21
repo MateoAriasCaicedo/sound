@@ -83,6 +83,9 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 
 ## En la ventana
 
+- **La primera vez** (o con la biblioteca vacía), Inicio da la bienvenida con tres maneras de
+  empezar (buscar, importar un enlace o música por frase), los géneros de YouTube y, mientras
+  bajan las primeras canciones, cuántas quedan.
 - **Selección múltiple**: clic, `Ctrl+clic` y `Mayús+clic`; `Ctrl+A` selecciona la vista actual.
 - **Volver al inicio**: un clic en «Sound», arriba a la izquierda, cierra páginas y la cola, limpia
   la búsqueda y vuelve a Inicio.
@@ -105,6 +108,8 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Duplicados y etiquetas**: clic derecho en la lista.
 - **Archivos incompletos**: se marcan con `✗` y se conservan; clic derecho → «Volver a descargar
   (archivo incompleto)». La copia anterior se renombra como `.damaged-…`, nunca se borra sola.
+- **Importar una playlist** de YouTube Music la guarda también como lista propia (en su orden;
+  reimportarla añade solo lo nuevo).
 - **Música por frase** e **Importar** (en «＋ Añadir música», arriba a la derecha) y
   **Descargas** (con el número de pendientes): páginas dentro de la misma ventana, a la
   derecha del lateral. `Esc`, Atrás o su enlace «← …» vuelven a donde se estaba.
@@ -123,6 +128,9 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Poco espacio en disco**: si quedan menos de 2 GB, las descargas pasan a una a la vez; por
   debajo de 500 MB se pausan y se avisa. Se reanudan solas al liberar espacio.
 - **Diagnóstico**: en Descargas, con comprobaciones del entorno y accesos a datos y registro.
+- **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al
+  cabo de un rato (de 15 minutos a hora y media) o al terminar la canción, con un fundido suave.
+  Se pausa, así que play sigue donde estaba.
 - **Sesión**: al cerrar se guardan canción, posición y cola. Al abrir aparece «Continúa donde lo
   dejaste» y no suena nada hasta que pulses play.
 - **Exportar y limpiar**: clic derecho en la lista.
@@ -208,6 +216,7 @@ app/
     health.py       comprobaciones, diagnóstico y actualización
     errors.py       traducción de errores de yt-dlp
     ytsearch.py     búsqueda y metadatos de YouTube Music
+    app_update.py   versiones nuevas de Sound (GitHub) y su instalador
     importer.py     álbumes, playlists, artistas y canciones
     genres.py       selección por género
     autogenre.py    clasificación con iTunes
@@ -221,6 +230,13 @@ app/
   ui/
     main.py         ventana (coordina las piezas)
     events.py       bucle de eventos de hilos y descargas
+    navigation.py   Atrás y Adelante
+    hero.py         cabecera con portada de álbumes, artistas y listas
+    drag.py         arrastrar y soltar canciones
+    chrome.py       barra de arriba y tema
+    app_updates.py  aviso e instalación de versiones nuevas
+    sleep_timer.py  temporizador para dormir
+    welcome.py      bienvenida con la biblioteca vacía
     page.py         base de las páginas integradas
     playqueue.py    cola de reproducción
     downloads.py    puente con el servicio de descargas

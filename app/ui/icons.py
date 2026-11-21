@@ -200,6 +200,19 @@ def _chevron_down(d, w):
     _line(d, [(5.5, 9), (12, 15.5), (18.5, 9)], w)
 
 
+def _moon(d, w):
+    """Luna creciente: el temporizador para dormir. Dos circunferencias que se cortan: de la
+    grande se dibuja lo que queda fuera de la pequeña y de la pequeña lo que cae dentro."""
+    (x1, y1, r1), (x2, y2, r2) = (11.5, 12.5, 8.0), (16.5, 7.5, 6.5)
+    dist = math.hypot(x2 - x1, y2 - y1)
+    toward = math.degrees(math.atan2(y2 - y1, x2 - x1))  # de la grande hacia la pequeña
+    a = (r1 ** 2 - r2 ** 2 + dist ** 2) / (2 * dist)      # del centro grande a la cuerda común
+    outer = math.degrees(math.acos(a / r1))
+    inner = math.degrees(math.acos((dist - a) / r2))
+    _line(d, _arc(x1, y1, r1, toward + outer, toward + 360 - outer), w)
+    _line(d, _arc(x2, y2, r2, toward + 180 - inner, toward + 180 + inner), w)
+
+
 def _heart_points() -> list:
     """Contorno clásico de corazón, escalado a la retícula de 24."""
     def point(t):
@@ -225,7 +238,7 @@ _ICONS = dict(prev=_prev, next=_next, shuffle=_shuffle, repeat=_repeat, repeat1=
               more=_more, settings=_settings, tools=_tools, grid=_grid, list=_list,
               heart=_heart, heart_fill=_heart_fill, mini=_mini, expand=_expand,
               shrink=_shrink, stage=_stage, chevron_down=_chevron_down,
-              chevron_left=_chevron_left, chevron_right=_chevron_right)
+              chevron_left=_chevron_left, chevron_right=_chevron_right, moon=_moon)
 
 
 def names() -> list[str]:

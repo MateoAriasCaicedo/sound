@@ -74,3 +74,25 @@ def test_export_m3u_of_a_playlist_keeps_its_order(tmp_path):
     assert library.export_m3u(dest, tracks=playlists.tracks(pid)) == 2  # la remota no tiene archivo
     lines = dest.read_text(encoding="utf-8").splitlines()
     assert lines[2].endswith("b.m4a") and lines[4].endswith("a.m4a")
+
+
+def test_importing_a_youtube_playlist_twice_completes_it_instead_of_duplicating():
+    add("a")
+    first = [remote("y"), library.get_track("a"), remote("z")]
+    pid, added, created = playlists.import_list("Éxitos 80", "yt:PL123", first)
+    assert created and added == 3
+    assert [t["video_id"] for t in playlists.tracks(pid)] == ["y", "a", "z"]  # su orden
+    again, added, created = playlists.import_list("Éxitos 80", "yt:PL123",
+                                                  first + [remote("w")])
+    assert again == pid and not created and added == 1
+    assert [t["video_id"] for t in playlists.tracks(pid)] == ["y", "a", "z", "w"]
+    assert [p["name"] for p in playlists.all_playlists()] == ["Éxitos 80"]
+
+
+def test_imported_list_gets_its_own_name_and_comes_back_after_deleting():
+    playlists.create("Éxitos 80")  # una lista propia con el mismo nombre
+    pid, _added, _created = playlists.import_list("Éxitos 80", "yt:PL9", [remote("y")])
+    assert playlists.get(pid)["name"] == "Éxitos 80 2"
+    playlists.delete(pid)
+    again, added, created = playlists.import_list("Éxitos 80", "yt:PL9", [remote("y")])
+    assert created and added == 1 and again != pid

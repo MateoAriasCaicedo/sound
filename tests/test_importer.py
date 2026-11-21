@@ -82,3 +82,13 @@ def test_fetch_wraps_youtube_errors(monkeypatch):
 
     with pytest.raises(importer.ImportFailure, match="No se pudo leer"):
         importer.fetch("PLabc123")
+
+
+def test_source_of_only_recognises_playlists():
+    from app.core.importer import source_of
+    assert source_of("https://music.youtube.com/playlist?list=PLabc123") == "yt:PLabc123"
+    assert source_of("VLPLabc123") == "yt:PLabc123"
+    assert source_of("https://music.youtube.com/playlist?list=OLAK5uy_album") is None  # álbum
+    assert source_of("https://music.youtube.com/watch?v=dQw4w9WgXcQ") is None
+    assert source_of("https://music.youtube.com/channel/UCabcdefghijklmnopqrstuv") is None
+    assert source_of("no es un enlace") is None

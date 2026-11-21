@@ -63,6 +63,7 @@ class EventLoopMixin:
                     self.yt_failed = ev[1] is None
                     self.yt_genres = ev[1] or []
                     self._build_sidebar()
+                    self._sync_welcome()  # la bienvenida ofrece los mismos géneros
                 elif kind == "stream":
                     if ev[1] == self.play_token:
                         if len(ev) > 4:  # URL de streaming

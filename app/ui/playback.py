@@ -214,6 +214,8 @@ class PlaybackMixin:
         if self._track_truncated(p.length):
             self._stop_damaged(p.length)
             return
+        if self._sleep_blocks_transition():  # se apaga al acabar esta: suena entera, sin mezcla
+            return
         nxt = self._peek_next()
         if nxt is None:
             return

@@ -80,6 +80,16 @@ def parse(url: str) -> Reference:
                         "de YouTube Music.")
 
 
+def source_of(url: str) -> str | None:
+    """'yt:<id>' si el enlace es una playlist de YouTube (no un álbum, artista o canción): lo que
+    se guarda como lista propia al importarla. None si no lo es o no se entiende."""
+    try:
+        ref = parse(url)
+    except ImportFailure:
+        return None
+    return f"yt:{ref.id}" if ref.kind == "playlist" else None
+
+
 def _dedupe(tracks: list[dict]) -> list[dict]:
     seen = set()
     out = []

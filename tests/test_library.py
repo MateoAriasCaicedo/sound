@@ -139,3 +139,20 @@ def test_missing_files_lists_and_removes_entries_without_file(tmp_path):
     assert library.remove_missing() == 1
     assert [t["video_id"] for t in library.all_tracks()] == ["a"]
 
+
+
+def test_migration_v5_remembers_where_lists_were_imported_from(tmp_path):
+    old = tmp_path / "v4.db"
+    with closing(sqlite3.connect(old)) as conn, conn:
+        conn.execute("CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     " name TEXT NOT NULL, created_at TEXT)")
+        conn.execute("INSERT INTO playlists (name) VALUES ('Mía')")
+        conn.execute("PRAGMA user_version = 4")
+
+    with closing(library.connect(old)) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(playlists)")}
+        mine = conn.execute("SELECT name, source FROM playlists").fetchone()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert "source" in columns and tuple(mine) == ("Mía", None)
+    assert version == library.SCHEMA_VERSION == 5
+    assert (tmp_path / "v4.v4.bak.db").exists()  # copia antes de migrar

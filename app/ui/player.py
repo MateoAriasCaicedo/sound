@@ -5,8 +5,10 @@ Lee m4a fragmentados (DASH) que MCI no puede abrir, y también URLs http de stre
 Transiciones: cada canción es un `_Slot` (un MediaPlayer con su volumen propio). Pueden sonar dos
 a la vez; `update_fades` (se llama cada ~40 ms) mueve sus volúmenes con curvas de potencia
 constante (seno/coseno: sin² + cos² = 1), de modo que un crossfade no baja ni sube el volumen
-percibido. `prepare` abre una canción por adelantado, de modo que cargarla después con la misma
-clave empieza a sonar casi al instante (condición para un paso sin hueco).
+percibido. El temporizador para dormir usa otra curva, «dim» ((1 - p)²): baja desde el principio,
+poco a poco, en vez de aguantar arriba y caer al final. `prepare` abre una canción por adelantado,
+de modo que cargarla después con la misma clave empieza a sonar casi al instante (condición para
+un paso sin hueco).
 """
 import math
 import time
@@ -22,6 +24,15 @@ MAX_PREPARED = 14
 PAUSE_FADE_MS = 180   # fundido al pausar y reanudar: evita el corte seco
 MIN_INTRO_MS = 150    # entrada mínima cuando el que sonaba ya había terminado
 LINGER_S = 1.0        # máximo que se deja terminar una canción en un paso sin hueco
+
+
+def ramp_gain(kind: str, p: float) -> float:
+    """Ganancia de un fundido a mitad de camino (`p` de 0 a 1)."""
+    if kind == "in":
+        return math.sin(p * math.pi / 2)
+    if kind == "out":
+        return math.cos(p * math.pi / 2)
+    return (1 - p) ** 2  # "dim"
 
 
 class _Slot:
@@ -50,9 +61,15 @@ class _Slot:
         return self.mp.playback_session
 
     def start_ramp(self, kind: str, ms: float, after=None) -> None:
-        """Fundido de entrada ("in") o salida ("out") desde la ganancia actual, sin saltos."""
+        """Fundido de entrada ("in"), salida ("out") o salida lenta ("dim") desde la ganancia
+        actual, sin saltos."""
         g = min(1.0, max(0.0, self.gain))
-        done = math.asin(g) / (math.pi / 2) if kind == "in" else math.acos(g) / (math.pi / 2)
+        if kind == "in":
+            done = math.asin(g) / (math.pi / 2)
+        elif kind == "out":
+            done = math.acos(g) / (math.pi / 2)
+        else:
+            done = 1 - math.sqrt(g)
         ms = max(1.0, ms)
         self.ramp = {"t0": time.monotonic() - done * ms / 1000, "ms": ms, "kind": kind, "after": after}
 
@@ -159,7 +176,7 @@ class Player:
             if not ramp:
                 continue
             p = min(1.0, (now - ramp["t0"]) * 1000 / ramp["ms"])
-            slot.gain = math.sin(p * math.pi / 2) if ramp["kind"] == "in" else math.cos(p * math.pi / 2)
+            slot.gain = ramp_gain(ramp["kind"], p)
             self._apply(slot)
             if p >= 1.0:
                 slot.ramp = None
@@ -198,6 +215,15 @@ class Player:
                 slot.start_ramp("out", fade_ms, after=slot.mp.pause)
             else:
                 slot.mp.pause()
+
+    def fade_to_pause(self, ms: int) -> None:
+        """Baja poco a poco hasta el silencio y pausa (temporizador para dormir). Se cuenta como
+        pausada desde ya: reanudar a mitad vuelve a subir desde donde iba."""
+        slot = self._cur
+        if slot is None or self.paused:
+            return
+        self.paused = True
+        slot.start_ramp("dim", ms, after=slot.mp.pause)
 
     def seek(self, ms: int) -> None:
         if self.loaded:

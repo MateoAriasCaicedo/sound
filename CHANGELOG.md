@@ -30,6 +30,28 @@
 - **Página de artista**: primero **lo que más escuchas** suyo y debajo su discografía.
 - **Arrastrar y soltar**: canciones de cualquier lista o búsqueda sobre una lista del lateral
   para añadirlas, y dentro de una lista para cambiar su orden (en la vista de lista).
+- **Importar una playlist de YouTube la guarda también en «Tus listas»**, con su nombre y en su
+  orden, y la abre (se puede desactivar en Importar). Si ya la habías importado no se duplica:
+  se le añaden las canciones nuevas.
+
+### Primera vez
+- **Bienvenida con la biblioteca vacía**: en vez de una tabla vacía con sus columnas, Inicio
+  explica en una frase qué hace Sound y ofrece tres maneras de empezar (buscar, importar un
+  enlace o música por frase) y los géneros de YouTube como atajo. Mientras bajan las primeras
+  canciones dice cuántas quedan, con un enlace a Descargas, y se va sola cuando llega la
+  primera. Con la ventana baja, deja fuera primero la nota de dónde se guardan las canciones y
+  luego los géneros.
+
+### Reproducción
+- **Temporizador para dormir**: el botón de la luna, en la barra de abajo, apaga la música al
+  cabo de 15, 30 o 45 minutos, 1 hora u hora y media, o **al terminar la canción**. Lleva los
+  minutos que quedan y se puede alargar o desactivar desde el mismo menú. A la hora, la música
+  baja poco a poco durante unos segundos y se pausa: play sigue donde estaba, y «Seguir
+  escuchando» lo deshace si te pilla despierto. «Al terminar la canción» la deja sonar entera,
+  sin mezclarla con la siguiente, y play empieza la siguiente.
+- Con la ventana muy estrecha, el botón de crossfade se oculta para que el tiempo se vea entero
+  (sigue en Ajustes › Transición). Antes, al pasar de maximizada al tamaño mínimo, la parte
+  derecha del reproductor podía quedar cortada.
 
 ### Lateral y barra de arriba
 - **«＋ Añadir música»** reúne lo que antes eran iconos sueltos sin texto: buscar en YouTube,

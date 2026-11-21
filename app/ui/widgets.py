@@ -923,12 +923,14 @@ class ChipBar(tk.Canvas):
     """Opciones excluyentes en forma de pastilla (las décadas de la vista, por ejemplo).
 
     `on_pick(clave)` recibe la clave elegida; volver a pulsar la marcada la desmarca (None).
+    Con `idle` las no marcadas llevan ya un fondo suave (parecen botones aun sin el ratón encima).
     """
 
-    def __init__(self, master, anim: Animator, k: float, font, on_pick) -> None:
+    def __init__(self, master, anim: Animator, k: float, font, on_pick, idle: float = 0.0) -> None:
         self.h = int(28 * k)
         super().__init__(master, height=self.h, width=1, highlightthickness=0, bd=0)
         self.anim, self.k, self.font, self.on_pick = anim, k, font, on_pick
+        self.idle = idle
         self.options: list[tuple] = []
         self.selected = None
         self.hover: int | None = None
@@ -951,6 +953,10 @@ class ChipBar(tk.Canvas):
         self.configure(bg=bg)
         self._render()
 
+    def chip_width(self, label: str) -> int:
+        """Lo que ocupa una pastilla con ese texto, con el hueco que la separa de la siguiente."""
+        return self.font.measure(label) + 2 * int(11 * self.k) + int(4 * self.k)
+
     def _render(self) -> None:
         self.delete("all")
         self._spans, self._photos = [], []
@@ -959,7 +965,8 @@ class ChipBar(tk.Canvas):
         for i, (key, label) in enumerate(self.options):
             w = self.font.measure(label) + 2 * pad
             chosen = key == self.selected
-            fill = blend(c["bg"], c["fg"], 0.15 if chosen else 0.07 if i == self.hover else 0.0)
+            fill = blend(c["bg"], c["fg"], 0.15 if chosen else
+                         self.idle + (0.07 if i == self.hover else 0.0))
             if fill != c["bg"]:
                 photo = ImageTk.PhotoImage(_layer(_rounded_mask(w, h, h // 2), fill), master=self)
                 self._photos.append(photo)

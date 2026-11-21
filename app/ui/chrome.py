@@ -81,6 +81,7 @@ class ChromeMixin:
         self.downloads_left = left
         self.btn_downloads.set_badge(badge_text(left), self.fonts["badge"],
                                      muted=self.dl_paused)
+        self._welcome_downloads(left)  # la bienvenida cuenta las primeras canciones
 
     def _downloads_tip(self) -> str:
         left = self.downloads_left

@@ -45,6 +45,7 @@ from .navigation import NavigationMixin, Place, section_key
 from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
 from .playqueue import PlayQueue
+from .sleep_timer import SleepTimerMixin
 from .theme import (
     FONT_FAMILY,
     blend,
@@ -57,6 +58,8 @@ from .theme import (
     vivid,
 )
 from .toast import Toast
+from .welcome import TITLE as WELCOME_TITLE
+from .welcome import WelcomeMixin
 from .widgets import (
     ChipBar,
     Cover,
@@ -116,7 +119,7 @@ DUPES_CHECK_MS = 8000  # tras arrancar, se buscan canciones repetidas para ofrec
 
 
 class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMixin,
-          LibraryMixin, PlaybackMixin, EventLoopMixin):
+          SleepTimerMixin, WelcomeMixin, LibraryMixin, PlaybackMixin, EventLoopMixin):
     def __init__(self) -> None:
         super().__init__()
         self.pq = PlayQueue(self._is_remote, lambda: self.online)
@@ -217,8 +220,11 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self._cookies_dialog_shown = False
         self._crash_shown = False
         self._init_chrome()  # tema (Como Windows, claro u oscuro) y barra de arriba (chrome.py)
+        self._init_sleep()   # temporizador para dormir (sleep_timer.py)
         # secciones del lateral plegadas: «lists», «genres», «yt»
         self._side_folded = {str(n) for n in self.prefs.get("side_folded") or []}
+        # al importar una playlist de YouTube, guardarla también como lista propia
+        self.import_as_playlist = bool(self.prefs.get("import_as_playlist", True))
         self._last_volume = float(self.prefs.get("vol", 80))
         self.auto_update = bool(self.prefs.get("auto_update", True))
         try:
@@ -500,6 +506,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         for seq, delta in (("<Alt-Up>", -1), ("<Alt-Down>", 1)):
             self.grid.bind(seq, lambda e, d=delta: self._move_key(d))
         self.empty = tk.Label(mid, font=f["body"])
+        self._build_welcome(mid)  # con la biblioteca vacía, en vez de la tabla (welcome.py)
 
         # panel «A continuación»: vive fuera de la vista y entra deslizándose
         w = int(DRAWER_W * k)
@@ -597,6 +604,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.btn_queue = IconButton(right, self.anim, k, "queue", self._show_queue,
                                     tip="A continuación")
         self.btn_queue.pack(side="right")
+        self._build_sleep_button(right).pack(side="right")
         self.btn_xfade = IconButton(
             right, self.anim, k, "xfade", self.cycle_xfade,
             tip=lambda: f"Crossfade de {self.xfade_ms // 1000} s" if self.xfade_ms
@@ -615,38 +623,53 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.band_frames = (band, bar, left, mid_bar, right)
         self._bar_parts = (bar, mid_bar, right)
         self._bar_full: int | None = None  # ancho que pide la derecha del reproductor completa
-        self._bar_compact = False
-        band.bind("<Configure>", lambda e: self.after_idle(self._fit_bar))
+        self._bar_level = 0  # 0 completa, 1 volumen corto sin icono, 2 además sin crossfade
+        # la barra misma (no la franja): al saltar de maximizada al mínimo, la franja avisa antes
+        # de que la barra tenga su ancho nuevo y el ajuste se quedaba con el viejo
+        bar.bind("<Configure>", lambda e: self.after_idle(self._fit_bar))
         self.top_icons = (self.btn_downloads, self.btn_settings, self.btn_nav_back,
                           self.btn_nav_fwd)
         self.bar_icons = (self.btn_shuffle, self.btn_prev, self.btn_next, self.btn_repeat,
                           self.vol_icon, self.btn_queue, self.btn_xfade, self.btn_auto,
-                          self.btn_mini, self.btn_stage)
+                          self.btn_mini, self.btn_stage, self.btn_sleep)
         self.vol.set(self.prefs.get("vol", 80))
 
         self.bind("<space>", self._space)
         self._refresh_toggles()
 
     def _fit_bar(self) -> None:
-        """Con la ventana estrecha, el volumen se acorta y pierde su icono: así el tiempo
-        («1:23 / 4:56») sigue entero a la derecha del reproductor."""
+        """Con la ventana estrecha, el volumen se acorta y pierde su icono; más estrecha aún, se
+        oculta el crossfade (está también en Ajustes › Transición). Así el tiempo («1:23 / 4:56»)
+        sigue entero a la derecha del reproductor."""
         bar, mid_bar, right = self._bar_parts
         room = (bar.winfo_width() - mid_bar.winfo_width()) // 2
         if room <= 1:
             return
         if self._bar_full is None:
-            if self._bar_compact:
+            if self._bar_level:
                 return
             self._bar_full = right.winfo_reqwidth()
-        compact = room < self._bar_full
-        if compact == self._bar_compact:
+        k = self.k
+        savings = (int(28 * k) + self.vol_icon.winfo_reqwidth() + int(6 * k),  # 92 → 64 y su icono
+                   self.btn_xfade.winfo_reqwidth())
+        need, level = self._bar_full, 0
+        for save in savings:
+            if room >= need:
+                break
+            need -= save
+            level += 1
+        if level == self._bar_level:
             return
-        self._bar_compact = compact
-        self.vol.set_length(64 if compact else 92)
-        if compact:
+        self._bar_level = level
+        self.vol.set_length(64 if level else 92)
+        if level >= 1:
             self.vol_icon.pack_forget()
         else:
-            self.vol_icon.pack(side="right", padx=(int(6 * self.k), 0), after=self.vol)
+            self.vol_icon.pack(side="right", padx=(int(6 * k), 0), after=self.vol)
+        if level >= 2:
+            self.btn_xfade.pack_forget()
+        else:
+            self.btn_xfade.pack(side="right", after=self.btn_sleep)
 
     def _place_eq(self) -> None:
         """Coloca el ecualizador sobre la fila que suena, con el fondo que tenga esa fila."""
@@ -1137,6 +1160,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         for w in (self.content, self.mid, self.list_tools):
             w.configure(bg=p["bg"])
         self.empty.configure(bg=p["bg"], fg=p["dim"])
+        self.welcome.restyle(p)
         self.genres.restyle(bg=p["bg"], fg=p["fg"], dim=p["dim"], faint=p["faint"], sel=p["sel"],
                             hover=p["hover"])
         self.drawer.configure(bg=p["panel"])
@@ -1782,6 +1806,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         if self.sub_view is not None:
             return self.sub_view["title"]
         if self.view_kind == "home":
+            if self._welcome_wanted():
+                return WELCOME_TITLE
             return home.greeting(datetime.datetime.now().hour)
         if self.view_kind == "playlist":
             return self._playlist_name(self.playlist_id) or "Lista"
@@ -2029,6 +2055,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self.tree.column(c, width=max(int(90 * k), room * base[c] // total))
 
     def _update_empty(self) -> None:
+        if self._sync_welcome():  # biblioteca vacía: la bienvenida ocupa el sitio de la tabla
+            self.empty.place_forget()
+            return
         if self.rows:
             self.empty.place_forget()
             return
@@ -2601,12 +2630,43 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         if browser:
             self._cookies_dialog_shown = True
 
-    def import_loaded(self, label: str, tracks: list[dict]) -> None:
-        """Muestra lo importado en la biblioteca y encola solo las canciones nuevas."""
+    def import_loaded(self, label: str, tracks: list[dict], source: str | None = None) -> None:
+        """Muestra lo importado en la biblioteca y encola solo las canciones nuevas. Con
+        `source` (una playlist de YouTube), la guarda además como lista propia y la abre."""
+        if source and self._import_as_playlist(label, tracks, source):
+            return
         with self._navigating():
             self._hide_page()
             self.close_views()
             self._show_imported(label, tracks)
+
+    def _import_as_playlist(self, label: str, tracks: list[dict], source: str) -> bool:
+        """Guarda la playlist importada en «Tus listas» (o completa la que ya se importó) y la
+        abre. False si no se pudo: entonces se enseña como una importación normal."""
+        try:
+            pid, added, created = playlists_store.import_list(label, source, tracks)
+        except Exception as exc:  # noqa: BLE001 - la importación sigue, sin lista
+            _log.failure(log, "no se pudo guardar la playlist importada como lista", exc)
+            self.toast.show(f"No se pudo guardar «{label}» en tus listas")
+            return False
+        new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
+        if new:
+            self.dl.submit(new, None)
+        self._select_playlist(pid)
+        self.refresh_view()  # si ya estaba abierta, _select_playlist no la repinta
+        name = self._playlist_name(pid) or label
+        downloading = f", {len(new)} en descarga" if new else ""
+        if created:
+            n = len(tracks)
+            self.toast.show(f"Lista «{name}» guardada en tus listas: "
+                            f"{n} {'canción' if n == 1 else 'canciones'}{downloading}")
+        elif added:
+            self.toast.show(f"«{name}» ya estaba en tus listas: "
+                            f"{added} {'canción nueva' if added == 1 else 'canciones nuevas'}"
+                            f"{downloading}")
+        else:
+            self.toast.show(f"«{name}» ya estaba en tus listas y no hay canciones nuevas")
+        return True
 
     def _show_imported(self, label: str, tracks: list[dict]) -> None:
         new = [t for t in tracks if t["video_id"] not in self.lib_by_id]
@@ -3567,6 +3627,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.play_token += 1
         token = self.play_token
         vid = t["video_id"]
+        if how == "manual":
+            self._sleep_wake()  # la pediste tú: ya no se está apagando
         self.resume_track = None
         self.resume_position = 0
         self.overlap = False
@@ -3801,6 +3863,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         return "break"
 
     def play_pause(self) -> None:
+        if self._sleep_wake():  # el temporizador paró al acabar la canción: sigue la siguiente
+            self.step(1)
+            return
         if not self.player.loaded:
             if self.resume_track is not None:
                 track = self.resume_track
@@ -3817,6 +3882,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.btn_play.configure(text="▶" if self.player.paused else "⏸")
 
     def step(self, d: int, auto: bool = False) -> None:
+        if auto and self._sleep_stops_queue():  # temporizador para dormir: aquí se para
+            return
         how = "auto" if auto else "manual"
         if auto and self.pq.repeat == 2 and self.playing_vid:
             cur = self.pq.current(self.playing_vid)
@@ -3895,6 +3962,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         """Reprograma siempre: un fallo en un fotograma no debe congelar la reproducción."""
         try:
             self._tick_once()
+            self._sleep_tick()
             self._sync_outside()
             self._count_downloads()
         except Exception as exc:  # noqa: BLE001 - el bucle de Tk no debe quedarse sin tick
@@ -3962,6 +4030,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
 
     def _select_playlist(self, pid: int) -> None:
         """Abre la lista como si se hubiera pulsado en el lateral."""
+        if "lists" in self._side_folded:  # plegada, la lista nueva no estaría a la vista
+            self._side_folded.discard("lists")
+            self.save_prefs()
         self._build_sidebar()
         index = self._playlist_index(pid)
         if index is None:
@@ -4705,6 +4776,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         if volume <= 0 and self._last_volume > 0:
             volume = self._last_volume  # no guardar un 0 accidental al cerrar silenciado
         return {"dark": self.dark, "theme": self.theme_mode,
+                "import_as_playlist": self.import_as_playlist,
                 "side_folded": sorted(self._side_folded), "vol": volume, "shuffle": self.pq.shuffle,
                 "repeat": self.pq.repeat, "auto": self.autoplay, "xfade": self.xfade_ms,
                 "normalize": self.normalize, "cookies": self.cookies,
