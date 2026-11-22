@@ -1,5 +1,9 @@
 """Versiones nuevas de Sound: buscarlas en GitHub, descargar el instalador y abrirlo.
 
+Es la actualización automática de Windows (el instalador es un `.exe` con Inno Setup). En Linux
+`supported()` es False y la ventana no busca ni instala: se actualiza desde el código o con el
+gestor de paquetes.
+
 Solo se consulta la lista pública de versiones del proyecto en GitHub, como mucho una vez al día
 y si está activado en Ajustes. No se envía nada de la biblioteca ni del equipo: la petición lleva
 la versión instalada en el User-Agent y nada más.
@@ -18,6 +22,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -39,6 +44,11 @@ _HEX64 = re.compile(r"\b([0-9a-fA-F]{64})\b")
 
 class UpdateError(Exception):
     """Algo salió mal al buscar o descargar; el mensaje se puede enseñar tal cual."""
+
+
+def supported() -> bool:
+    """La instalación automática es un instalador de Windows."""
+    return sys.platform == "win32"
 
 
 @dataclass(frozen=True)
@@ -259,6 +269,8 @@ def install_command(path: Path, autostart: bool | None = None) -> list[str]:
 
 def launch_installer(path: Path, autostart: bool | None = None) -> None:
     """Abre el instalador por su cuenta: sigue aunque Sound se cierre enseguida."""
+    if not supported():
+        raise UpdateError("La instalación automática solo está disponible en Windows")
     flags = 0
     if os.name == "nt":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP

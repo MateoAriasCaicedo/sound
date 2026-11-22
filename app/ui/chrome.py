@@ -3,17 +3,20 @@
 - «＋ Añadir música» reúne lo que antes eran iconos sueltos sin texto: buscar en YouTube,
   importar un enlace y música por frase.
 - Descargas lleva un contador con lo que queda por bajar (se mira cada dos segundos).
-- El tema sigue al de Windows («Como Windows», lo predeterminado) o es claro u oscuro. Siguiendo
-  a Windows, si el sistema cambia de tema la ventana cambia sola, sin reiniciar.
+- El tema sigue al del sistema (lo predeterminado) o es claro u oscuro. Siguiendo al sistema, si
+  cambia el tema de Windows o de GNOME la ventana cambia sola, sin reiniciar.
 """
 from __future__ import annotations
+
+import sys
 
 from .theme import system_is_dark
 from .widgets import PillButton
 
 THEMES = ("system", "light", "dark")
-THEME_LABELS = {"system": "Como Windows", "light": "Claro", "dark": "Oscuro"}
-SYSTEM_POLL_MS = 4000  # cada cuánto se mira el tema de Windows (si se le sigue)
+SYSTEM_THEME_LABEL = "Como Windows" if sys.platform == "win32" else "Como el sistema"
+THEME_LABELS = {"system": SYSTEM_THEME_LABEL, "light": "Claro", "dark": "Oscuro"}
+SYSTEM_POLL_MS = 4000  # cada cuánto se mira el tema del sistema (si se le sigue)
 BADGE_EVERY = 5        # ticks de reproducción (~2 s) entre cada recuento de descargas
 
 
@@ -102,7 +105,7 @@ class ChromeMixin:
         self.save_prefs()
 
     def cycle_theme(self) -> None:
-        """Como Windows → Claro → Oscuro → Como Windows."""
+        """Sistema → Claro → Oscuro → Sistema."""
         self.set_theme_mode(THEMES[(THEMES.index(self.theme_mode) + 1) % len(THEMES)])
         self.status.configure(text=f"Tema: {THEME_LABELS[self.theme_mode]}")
 

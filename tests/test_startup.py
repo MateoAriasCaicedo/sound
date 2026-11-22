@@ -1,11 +1,11 @@
-"""Arranque con Windows: comando correcto y clave Run del usuario."""
+"""Arranque automático: comando correcto, clave Run (Windows) y .desktop (Linux)."""
 import os
 
 import pytest
 
 from app.core import startup
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="la clave Run es de Windows")
+windows_only = pytest.mark.skipif(os.name != "nt", reason="la clave Run es de Windows")
 
 
 class FakeKey:
@@ -59,6 +59,7 @@ def test_launch_command_uses_pythonw_in_development(monkeypatch, tmp_path):
     assert startup._launch_command(frozen=False) == f'"{tmp_path / "pythonw.exe"}" -m app.ui'
 
 
+@windows_only
 def test_enable_reads_and_removes_the_run_value(monkeypatch):
     registry = FakeWinreg()
     monkeypatch.setattr(startup, "_winreg", lambda: registry)
@@ -74,10 +75,32 @@ def test_enable_reads_and_removes_the_run_value(monkeypatch):
     assert not startup.is_enabled()
 
 
+@windows_only
 def test_a_stale_entry_for_another_installation_does_not_count(monkeypatch):
     registry = FakeWinreg()
     registry.values["Sound"] = r'"D:\Otra\Sound.exe"'
     monkeypatch.setattr(startup, "_winreg", lambda: registry)
     monkeypatch.setattr(startup, "_launch_command", lambda: r'"C:\Sound\Sound.exe"')
 
+    assert not startup.is_enabled()
+
+
+def test_linux_autostart_writes_and_removes_a_desktop_entry(monkeypatch, tmp_path):
+    monkeypatch.setattr(startup.sys, "platform", "linux")
+    monkeypatch.setattr(startup.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    assert startup.available()
+    assert not startup.is_enabled()
+    assert startup.set_enabled(True)
+
+    entry = (tmp_path / "autostart" / "sound.desktop").read_text(encoding="utf-8")
+    assert "Exec=/usr/bin/python3 -m app.ui" in entry
+    assert startup.is_enabled()
+
+    # Otra instalación distinta no cuenta como la misma entrada.
+    monkeypatch.setattr(startup.sys, "executable", "/opt/otra/python3")
+    assert not startup.is_enabled()
+
+    assert startup.set_enabled(False)
     assert not startup.is_enabled()

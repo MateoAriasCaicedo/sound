@@ -1,10 +1,14 @@
-"""Paletas claro/oscuro, color derivado de la portada y detalles de ventana de Windows.
+"""Paletas claro/oscuro, color derivado de la portada y detalles de ventana del sistema.
 
 Base neutra y un único acento, negro sobre el tema claro y blanco sobre el oscuro. El tinte de la
 ventana sale de la canción que suena: de su portada o, si no tiene, del acento del tema.
 """
 import colorsys
 import hashlib
+import os
+import subprocess
+import sys
+import time
 
 LIGHT = dict(bg="#f8f8f9", panel="#f0f0f2", raised="#ffffff", fg="#17171a", dim="#6b6b74",
              faint="#70707a", accent="#000000", accent_fg="#ffffff", sel="#e7e7eb",
@@ -13,7 +17,12 @@ DARK = dict(bg="#101013", panel="#17171b", raised="#202026", fg="#eeeef2", dim="
             faint="#7b7b86", accent="#ffffff", accent_fg="#101013", sel="#232329",
             hover="#1a1a1f", line="#26262d", field="#1b1b20", danger="#ee6a66")
 
-FONT_FAMILY = "Segoe UI"
+if sys.platform == "win32":
+    FONT_FAMILY = "Segoe UI"
+elif sys.platform == "darwin":
+    FONT_FAMILY = "Helvetica Neue"
+else:
+    FONT_FAMILY = "Noto Sans"  # el fallback de Tk si no está instalada es razonable
 
 
 def palette(dark: bool) -> dict:
@@ -111,15 +120,43 @@ def enable_dpi_awareness() -> None:
         pass
 
 
+_DARK_CACHE = {"at": 0.0, "dark": False}
+_DARK_TTL_S = 30.0  # el tema se sondea cada pocos segundos: no hace falta preguntar más a menudo
+
+
 def system_is_dark() -> bool:
-    try:
-        import winreg
-        with winreg.OpenKey(  # se mira cada pocos segundos: la clave se cierra siempre
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
-            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
-    except OSError:
-        return False
+    """¿El sistema está en tema oscuro? Windows: el registro; Linux: GNOME/GTK."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(  # se mira cada pocos segundos: la clave se cierra siempre
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+        except (OSError, ImportError):  # fuera de Windows, `winreg` no existe
+            return False
+    if sys.platform.startswith(("linux", "freebsd")):
+        now = time.monotonic()
+        if now - _DARK_CACHE["at"] >= _DARK_TTL_S:
+            _DARK_CACHE.update(at=now, dark=_linux_is_dark())
+        return bool(_DARK_CACHE["dark"])
+    return False
+
+
+def _linux_is_dark() -> bool:
+    """Tema oscuro en Linux: GTK_THEME, el esquema de GNOME o el nombre del tema GTK."""
+    if "dark" in os.environ.get("GTK_THEME", "").lower():
+        return True
+    for key in ("color-scheme", "gtk-theme"):
+        try:
+            done = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.interface", key],
+                capture_output=True, text=True, timeout=1.5, check=False)
+        except (OSError, subprocess.SubprocessError):  # sin gsettings (KDE, XFCE…)
+            break
+        if "dark" in done.stdout.lower():
+            return True
+    return False
 
 
 def style_titlebar(window, dark: bool, caption: str | None = None) -> None:

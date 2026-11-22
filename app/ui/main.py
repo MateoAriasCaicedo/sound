@@ -3,6 +3,7 @@ import datetime
 import io
 import queue
 import re
+import sys
 import threading
 import time
 import tkinter as tk
@@ -82,6 +83,7 @@ from .widgets import (
     Tooltip,
     WaveSeek,
     bind_touchpad,
+    bind_wheel,
     touchpad_deltas,
     ui_fonts,
 )
@@ -221,7 +223,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         cookies_store.configure(self.cookies)
         self._cookies_dialog_shown = False
         self._crash_shown = False
-        self._init_chrome()  # tema (Como Windows, claro u oscuro) y barra de arriba (chrome.py)
+        self._init_chrome()  # tema (Como el sistema, claro u oscuro) y barra de arriba (chrome.py)
         self._init_sleep()   # temporizador para dormir (sleep_timer.py)
         self._init_discover()  # «Descubre en YouTube» en Inicio (discover.py)
         self._init_radio()     # emisoras en directo (radio.py y radio_page.py)
@@ -316,14 +318,17 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.bind("<Control-m>", self._toggle_mute)  # silenciar
         self.bind("<Control-Up>", lambda e: self._volume_step(5))
         self.bind("<Control-Down>", lambda e: self._volume_step(-5))
-        self.bind("<MouseWheel>", self._wheel_anywhere, add="+")
+        bind_wheel(self, self._wheel_anywhere, add=True)
         bind_touchpad(self, self._touchpad_anywhere, add=True)
         self.bind("<Escape>", self._escape)
-        # Atrás y Adelante: Alt+← / Alt+→ y los botones laterales del ratón (4 y 5 en Windows)
+        # Atrás y Adelante: Alt+← / Alt+→ y los botones laterales del ratón. Tk solo numera
+        # hasta el 5 (en X11, 4 y 5 son la rueda), así que los laterales solo se enlazan en
+        # Windows.
         self.bind("<Alt-Left>", self.go_back)
         self.bind("<Alt-Right>", self.go_forward)
-        self.bind("<Button-4>", lambda e: self._mouse_side(False))
-        self.bind("<Button-5>", lambda e: self._mouse_side(True))
+        if sys.platform == "win32":
+            self.bind("<Button-4>", lambda e: self._mouse_side(False))
+            self.bind("<Button-5>", lambda e: self._mouse_side(True))
         self.play_pool.submit(self._warm_up)
         threading.Thread(target=self._net_loop, daemon=True).start()
         self.after(FADE_TICK_MS, self._fade_tick)
@@ -346,20 +351,23 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         icon = config.icon_path()
         if icon is None:
             return
+        if sys.platform == "win32":
+            try:
+                self.iconbitmap(str(icon))
+                self.iconbitmap(default=str(icon))  # también para los diálogos
+                return
+            except tk.TclError as exc:  # .ico no soportado o archivo ilegible
+                _log.failure(log, "no se pudo usar el icono .ico", exc)
+        # Linux y macOS no entienden .ico en Tk: se convierte con Pillow, que ya es dependencia.
         try:
-            self.iconbitmap(str(icon))
-            self.iconbitmap(default=str(icon))  # también para los diálogos
-            return
-        except tk.TclError as exc:  # .ico no soportado o archivo ilegible
-            _log.failure(log, "no se pudo usar el icono .ico", exc)
-        png = icon.with_suffix(".png")
-        try:
-            if png.exists():
-                self._icon_photo = tk.PhotoImage(file=str(png))
-                self.iconphoto(False, self._icon_photo)  # esta ventana
-                self.iconphoto(True, self._icon_photo)   # futuros diálogos
+            from PIL import Image, ImageTk
+
+            png = icon.with_suffix(".png")
+            image = Image.open(png if png.exists() else icon)
+            self._icon_photo = ImageTk.PhotoImage(image.convert("RGBA"))
+            self.iconphoto(True, self._icon_photo)  # esta ventana y los futuros diálogos
         except Exception as exc:  # noqa: BLE001 - el icono es cosmético
-            _log.failure(log, "no se pudo usar el icono .png", exc)
+            _log.failure(log, "no se pudo usar el icono de la ventana", exc)
 
     def _build(self) -> None:
         k = self.k
@@ -449,7 +457,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.sb_genres.grid_remove()
         # la rueda también desplaza la lista si el puntero cae en el margen o en la barra
         for w in (side, self.sb_genres):
-            w.bind("<MouseWheel>", self.genres._wheel)
+            bind_wheel(w, self.genres._wheel)
             bind_touchpad(w, self.genres._touchpad)
 
         mid = tk.Frame(content)
@@ -2281,7 +2289,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         threading.Thread(target=work, daemon=True).start()
 
     def toggle_start_with_windows(self) -> None:
-        """Activa o desactiva que Sound se abra al iniciar sesión en Windows."""
+        """Activa o desactiva que Sound se abra al iniciar sesión."""
         wanted = not self.start_with_windows
         if not startup.set_enabled(wanted):
             self.status.configure(
@@ -2289,8 +2297,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             return
         self.start_with_windows = wanted
         self.status.configure(text=(
-            "Sound se abrirá al iniciar Windows" if wanted
-            else "Sound ya no se abrirá al iniciar Windows"))
+            "Sound se abrirá al iniciar sesión"
+            if wanted else "Sound ya no se abrirá al iniciar sesión"))
 
     def toggle_auto_update(self) -> None:
         """Activa o desactiva la búsqueda diaria de una versión nueva de yt-dlp."""
@@ -3612,7 +3620,13 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self._normal_geometry = f"{w}x{h}+{x}+{y}"
         if isinstance(saved, dict) and saved.get("zoomed"):
             self._zoomed = True
-            self.state("zoomed")
+            try:  # «zoomed» es de Windows; en X11 se pide con el atributo
+                if sys.platform == "win32":
+                    self.state("zoomed")
+                else:
+                    self.attributes("-zoomed", True)
+            except tk.TclError:  # el gestor de ventanas no lo soporta
+                self._zoomed = False
 
     def _window_moved(self, e) -> None:
         """Se apunta la geometría normal (la de antes de maximizar) para guardarla al cerrar."""
@@ -3711,6 +3725,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
 
     def _setup_system_media(self) -> None:
         """Teclas ⏯ ⏭ ⏮ (teclado, auriculares) y el recuadro multimedia de Windows."""
+        if sys.platform != "win32":
+            return  # sin SMTC en Linux; la ventana sigue igual
         from .media_keys import SystemMedia
         self.system_media = SystemMedia.create(
             on_button=lambda name: self.q.put(("media_key", name)),
@@ -3756,11 +3772,15 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self.play_pause()
 
     def _setup_taskbar(self) -> None:
+        if sys.platform != "win32":  # la miniatura con botones es una API de Windows
+            return
         from .taskbar import TaskbarButtons
         self.taskbar = TaskbarButtons(int(self.wm_frame(), 16), self._thumb_clicked)
         self.taskbar.install()
 
     def _setup_mini_taskbar(self) -> None:
+        if sys.platform != "win32":
+            return
         from .taskbar import TaskbarButtons
         if self.mini is not None:
             self.mini_taskbar = TaskbarButtons(int(self.mini.wm_frame(), 16), self._thumb_clicked)

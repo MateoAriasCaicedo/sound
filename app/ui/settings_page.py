@@ -7,6 +7,7 @@ Lo que es sí / no lleva un interruptor; lo que tiene varias opciones, todas a l
 elegida marcada. A la izquierda, un índice salta a cada sección y marca en cuál se está (se
 oculta si la ventana es estrecha).
 """
+import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -16,7 +17,7 @@ from .anim import reduced_motion
 from .chrome import THEME_LABELS, THEMES
 from .page import Page
 from .theme import system_is_dark
-from .widgets import PillButton, RowList, Segmented, Switch, bind_touchpad, touchpad_deltas
+from .widgets import PillButton, RowList, Segmented, Switch, bind_touchpad, bind_wheel, touchpad_deltas
 
 XFADE_OPTIONS = ((0, "No"), (2000, "2 s"), (4000, "4 s"), (6000, "6 s"), (8000, "8 s"),
                  (12000, "12 s"))
@@ -67,7 +68,7 @@ class SettingsPage(Page):
         self.index.set_items([dict(text=name) for name, _frame in self._sections])
         self.index.selection_set(0)
         self._bind_wheel(self.inner)
-        self.outer.bind("<MouseWheel>", self._wheel)
+        bind_wheel(self.outer, self._wheel)
         bind_touchpad(self.outer, self._touchpad)
 
         self.restyle()
@@ -125,7 +126,8 @@ class SettingsPage(Page):
         section = self._section("Apariencia",
                                 "El color de la ventana sigue a la portada de la canción.")
         self.btn_theme = self._choice(
-            section, "Tema", "«Como Windows» cambia solo cuando cambia el sistema.",
+            section, "Tema",
+            f"«{THEME_LABELS['system']}» cambia solo cuando cambia el del sistema.",
             [(mode, THEME_LABELS[mode]) for mode in THEMES], self.set_theme)
         self.btn_view = self._choice(
             section, "Vista de la biblioteca",
@@ -186,11 +188,12 @@ class SettingsPage(Page):
             self.toggle_auto_update)
 
     def _build_system(self) -> None:
+        windows = sys.platform == "win32"
         section = self._section(
             "Sistema",
-            "Integración con Windows. No hace falta ser administrador.")
+            "Inicio automático al entrar en el sistema. No hace falta ser administrador.")
         self.btn_start_windows = self._switch(
-            section, "Iniciar con Windows",
+            section, "Iniciar con Windows" if windows else "Iniciar con el sistema",
             "Abre Sound automáticamente al iniciar sesión. Al desinstalarlo se quita solo.",
             self.toggle_start_windows)
 
@@ -245,11 +248,15 @@ class SettingsPage(Page):
     def refresh_updates(self) -> None:
         app = self.app
         release, state = app.app_update, app.app_update_state
+        supported = app_update.supported()
         self.btn_app_updates.set(app.app_updates)
         busy = state in ("checking", "downloading", "installing")
-        self.btn_check.set_enabled(not busy)
+        self.btn_check.set_enabled(supported and not busy)
         self.btn_check.set_text("Buscando…" if state == "checking" else "Buscar ahora")
         note = app.app_update_note
+        if not supported:
+            note = ("Las actualizaciones automáticas solo están disponibles en Windows. "
+                    "En Linux, actualiza desde el código o con tu gestor de paquetes.")
         if not note and release is not None:
             note = f"Sound {release.version} está disponible."
         if not note:
@@ -263,7 +270,7 @@ class SettingsPage(Page):
         self.update_title.configure(text=f"Novedades de Sound {release.version}")
         notes = app_update.summary(release.notes) or "Mejoras y correcciones."
         self.update_notes.configure(text=notes, wraplength=int(640 * self.k))
-        installs = config.is_frozen() and release.installable
+        installs = config.is_frozen() and release.installable and supported
         self.btn_install.set_text(
             {"downloading": app.app_update_note or "Descargando…",
              "installing": "Instalando…"}.get(state, "Actualizar ahora" if installs
@@ -519,7 +526,7 @@ class SettingsPage(Page):
 
     def _bind_wheel(self, widget) -> None:
         for child in widget.winfo_children():
-            child.bind("<MouseWheel>", self._wheel, add="+")
+            bind_wheel(child, self._wheel, add=True)
             bind_touchpad(child, self._touchpad, add=True)
             self._bind_wheel(child)
 

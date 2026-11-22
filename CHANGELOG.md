@@ -1,5 +1,20 @@
 # Cambios
 
+## Sin publicar
+
+### Linux
+- **La ventana y la CLI funcionan en Linux.** El reproductor usa GStreamer (`playbin`) en vez de
+  Media Foundation: reproducción, pausa, búsqueda, volumen, streaming y crossfade. Hacen falta
+  `python3-gi` y los plugins de GStreamer (ver el README).
+- La rueda del ratón desplaza con los botones 4 y 5 de X11, el tema sigue al del sistema
+  (GNOME/GTK), el icono de la ventana se convierte desde el `.ico` y **Iniciar con el sistema**
+  escribe `~/.config/autostart/sound.desktop`.
+- Las actualizaciones automáticas de Sound siguen siendo solo para Windows; el Diagnóstico
+  comprueba GStreamer en lugar de los componentes de Windows.
+- **Ejecutable de Linux en GitHub Actions**: cada push compila
+  `Sound-<versión>-linux-x86_64.tar.gz` (Python, Tk, GStreamer y Node incluidos) y las etiquetas
+  `v*` lo publican junto al instalador de Windows.
+
 ## 1.4.2 — 2026-11-21
 
 ### Vista en grande

@@ -30,6 +30,7 @@ from .widgets import (
     PointerTip,
     _rounded_mask,
     bind_touchpad,
+    bind_wheel,
     elide,
     touchpad_deltas,
 )
@@ -173,7 +174,7 @@ class CoverGrid(tk.Canvas):
         self.bind("<Button-3>", self._context)
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", self._leave)
-        self.bind("<MouseWheel>", self._wheel)
+        bind_wheel(self, self._wheel)
         bind_touchpad(self, self._touchpad)
         self.bind("<Left>", lambda _e: self._move_by(-1))
         self.bind("<Right>", lambda _e: self._move_by(1))

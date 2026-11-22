@@ -6,6 +6,7 @@ mantienen la interfaz del control de Tk al que sustituyen (`get`/`set`, `configu
 """
 import math
 import random
+import sys
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -98,6 +99,32 @@ def bind_touchpad(widget, handler, add: bool = False) -> None:
         widget.bind("<TouchpadScroll>", handler, add="+" if add else None)
     except tk.TclError:
         pass  # Tk antiguo: la rueda normal sigue funcionando
+
+
+class _WheelEvent:
+    """Copia de un evento de rueda con `delta`, para X11 (<Button-4>/<Button-5>)."""
+
+    __slots__ = ("delta", "num", "x", "y", "x_root", "y_root", "state", "widget", "time")
+
+    def __init__(self, event, delta: int) -> None:
+        self.delta = delta
+        for name in self.__slots__[1:]:
+            setattr(self, name, getattr(event, name, None))
+
+
+def bind_wheel(widget, handler, add: bool = False) -> None:
+    """Enlaza la rueda en Windows/macOS (<MouseWheel>) y en X11 (<Button-4>/<Button-5>).
+
+    En X11 la rueda no llega como <MouseWheel>: son los botones 4 (arriba) y 5 (abajo). Se pasa
+    un evento con `delta` de ±120, la misma unidad que en Windows, para que los manejadores no
+    tengan que saber en qué sistema corren.
+    """
+    suffix = "+" if add else None
+    widget.bind("<MouseWheel>", handler, add=suffix)
+    if sys.platform == "win32" or sys.platform == "darwin":
+        return  # ahí la rueda ya es <MouseWheel>; Button-4/5 son botones laterales
+    widget.bind("<Button-4>", lambda e: handler(_WheelEvent(e, 120)), add=suffix)
+    widget.bind("<Button-5>", lambda e: handler(_WheelEvent(e, -120)), add=suffix)
 
 
 def _layer(mask: Image.Image, color: str) -> Image.Image:
@@ -1857,7 +1884,7 @@ class Slider(tk.Canvas):
         self.bind("<Leave>", lambda e: self._hover(0.0))
         self.bind("<ButtonPress-1>", self._drag)
         self.bind("<B1-Motion>", self._drag)
-        self.bind("<MouseWheel>", lambda e: self.set(self.value + (5 if e.delta > 0 else -5)))
+        bind_wheel(self, lambda e: self.set(self.value + (5 if e.delta > 0 else -5)))
 
     def _hover(self, to: float) -> None:
         start = self.h_amt
@@ -2333,7 +2360,7 @@ class RowList(tk.Canvas):
         self.bind("<Double-Button-1>", self._double)
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", lambda e: (self._set_hover(None), self._set_header_hot(None)))
-        self.bind("<MouseWheel>", self._wheel)
+        bind_wheel(self, self._wheel)
         bind_touchpad(self, self._touchpad)
         self.bind("<Up>", lambda e: self._key(-1))
         self.bind("<Down>", lambda e: self._key(1))

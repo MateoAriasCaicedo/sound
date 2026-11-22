@@ -33,7 +33,7 @@ class SystemMedia:
         try:
             return cls(on_button, on_seek)
         except Exception as exc:  # noqa: BLE001 - sin SMTC la app sigue, solo sin teclas
-            _log.failure(log, "sin teclas multimedia ni panel de Windows", exc)
+            _log.failure(log, "sin teclas multimedia ni panel multimedia del sistema", exc)
             return None
 
     def __init__(self, on_button, on_seek=None) -> None:

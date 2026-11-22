@@ -78,17 +78,6 @@ jobs:
           Set-Content -Path "$($setup.FullName).sha256" -Value "$hash  $($setup.Name)" -Encoding ascii -NoNewline
           Get-Content "$($setup.FullName).sha256"
 
-      # Las notas de la versión son su apartado del CHANGELOG: Sound las resume al avisar
-      - name: Release notes
-        shell: pwsh
-        run: |
-          $version = (Select-String -Path "app\__init__.py" -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
-          $text = Get-Content "CHANGELOG.md" -Raw -Encoding utf8
-          $found = [regex]::Match($text, "(?ms)^## " + [regex]::Escape($version) + "\b[^\n]*\n(.*?)(?=^## |\z)")
-          $notes = if ($found.Success) { $found.Groups[1].Value.Trim() } else { "" }
-          Set-Content -Path "dist\release-notes.md" -Value $notes -Encoding utf8
-          Get-Content "dist\release-notes.md"
-
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -100,13 +89,87 @@ jobs:
             dist/Sound-*-setup.exe.sha256
           if-no-files-found: error
 
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python, Tk, PyGObject and GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-tk python3-gi python3-gi-cairo \
+            gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+            gstreamer1.0-pulseaudio gstreamer1.0-alsa
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --upgrade pip
+          # --ignore-installed: que Pillow y compañía salgan de pip (con ImageTk), no del sistema
+          .venv/bin/pip install --ignore-installed -e ".[dev]" -c constraints.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Bundle Node.js
+        run: |
+          mkdir -p packaging/node
+          cp "$(command -v node)" packaging/node/node
+
+      - name: Build, self-test and package
+        env:
+          PYTHON: .venv/bin/python
+        run: bash packaging/build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sound-linux-${{ github.sha }}
+          path: |
+            dist/Sound-*-linux-*.tar.gz
+            dist/Sound-*-linux-*.tar.gz.sha256
+          if-no-files-found: error
+
+  # Un solo job publica: así Windows y Linux no compiten por crear la release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Las notas de la versión son su apartado del CHANGELOG: Sound las resume al avisar
+      - name: Release notes
+        shell: bash
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' app/__init__.py)"
+          python3 - "$version" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          version = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          found = re.search(rf"(?ms)^## {re.escape(version)}\b[^\n]*\n(.*?)(?=^## |\Z)", text)
+          notes = found.group(1).strip() if found else ""
+          pathlib.Path("dist/release-notes.md").write_text(notes, encoding="utf-8")
+          print(notes)
+          PY
+
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/Sound-*-setup.exe
             dist/Sound-*-setup.exe.sha256
             dist/Sound-*-windows.zip
+            dist/Sound-*-linux-*.tar.gz
+            dist/Sound-*-linux-*.tar.gz.sha256
           body_path: dist/release-notes.md
           generate_release_notes: true

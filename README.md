@@ -6,6 +6,9 @@ organiza por género y la reproduce en una ventana propia con cola automática y
 > Sound no aloja ni distribuye música. Descarga a petición del usuario y guarda los archivos en su
 > equipo. Lee [LEGAL.md](LEGAL.md) y [PRIVACY.md](PRIVACY.md) antes de usarlo.
 
+> **En Linux** se publica un `.tar.gz` con el ejecutable (no hay instalador); también se puede
+> ejecutar desde el código. Consulta [Desarrollo → Linux](#linux).
+
 ## Instalación para usuarios (Windows 10/11)
 
 1. Descarga `Sound-1.4.2-setup.exe` desde la página de *Releases* del repositorio.
@@ -173,6 +176,9 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 Antes de migrar el esquema se guarda una copia `library.vN.bak.db` junto a la base de datos. Los
 archivos de estado se escriben de forma atómica para que un corte no los corrompa.
 
+En Linux, «`%LOCALAPPDATA%\Sound`» es `~/.local/share/sound` y «`Music\Sound`» es `~/Music/Sound`
+(sin `SOUND_DATA_DIR` ni `SOUND_MUSIC_DIR`).
+
 ### Ajustes por entorno
 
 | Variable | Por defecto | Qué hace |
@@ -201,7 +207,30 @@ ruff check app tests
 Quedan disponibles `sound` (CLI) y `sound-ui` (ventana). También funcionan
 `python -m app.cli` y `python -m app.ui`.
 
-### Compilar el instalador
+### Linux
+
+La ventana y la CLI funcionan en Linux. En vez de Media Foundation, el audio usa GStreamer
+(`playbin`), que necesita `python3-gi` y los plugins. En Debian/Ubuntu:
+
+```bash
+sudo apt install python3-gi python3-gi-cairo \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+  nodejs ffmpeg
+python3 -m venv --system-site-packages .venv   # para que el venv vea `gi`
+.venv/bin/pip install --ignore-installed -e ".[dev]"   # Pillow de pip, con ImageTk
+.venv/bin/python -m app.ui
+```
+
+`--system-site-packages` es necesario porque `python3-gi` lo instala el sistema, no pip. Los
+tests y `ruff` no necesitan GStreamer.
+
+En Linux los datos van a `~/.local/share/sound` y la música a `~/Music/Sound` (se pueden cambiar
+con las variables `SOUND_DATA_DIR` y `SOUND_MUSIC_DIR`). **Iniciar con el sistema** escribe un
+archivo en `~/.config/autostart/sound.desktop`. Las actualizaciones automáticas de Sound siguen
+siendo solo para Windows: en Linux actualiza desde el código o con tu gestor de paquetes.
+
+### Compilar en Windows
 
 ```powershell
 .\packaging\build.ps1              # genera dist\Sound\Sound.exe
@@ -213,6 +242,26 @@ Node.js si falta y lo incluye en la build. La firma de código sigue siendo opci
 `SOUND_SIGN_CERT` (ruta al `.pfx`), `SOUND_SIGN_PASSWORD` y, si quieres sellar la hora,
 `SOUND_SIGN_TIMESTAMP`; el script firma `Sound.exe` y el instalador si `signtool.exe` está en el
 PATH. Sin certificado, Windows SmartScreen avisará.
+
+### Compilar en Linux
+
+```bash
+sudo apt install python3-venv python3-tk python3-gi python3-gi-cairo \
+  gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+  gstreamer1.0-pulseaudio gstreamer1.0-alsa
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install --ignore-installed -e ".[dev]" -c constraints.txt
+bash packaging/build.sh
+```
+
+`packaging/build.sh` comprueba que GStreamer esté completo, compila con PyInstaller, pasa el
+autotest y deja `dist/Sound-<versión>-linux-x86_64.tar.gz` con su `.sha256` y un `LEEME.txt`.
+El paquete incluye Python, Tk y GStreamer; la build de GitHub también copia Node.js (en local,
+si no dejas `packaging/node/node`, se usa el Node del sistema). GitHub Actions genera ese archivo
+en cada push y lo publica en la release al etiquetar `v*`. Compila en la distro más antigua que
+quieras soportar: el binario usa la glibc de la máquina que lo construye.
 
 ### Estructura
 
@@ -273,7 +322,7 @@ app/
     single_instance.py  una sola ventana
     theme.py        paletas y DPI
     widgets.py      controles dibujados
-packaging/          icono, entrada del .exe y build.ps1
+packaging/          icono, entrada del ejecutable y build.ps1 / build.sh
 sound.spec          PyInstaller
 installer.iss       Inno Setup
 tests/              pytest (no usan red ni tocan tu biblioteca)

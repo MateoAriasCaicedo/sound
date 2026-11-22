@@ -51,6 +51,10 @@ def fit(saved: tuple[int, int, int, int], areas: list[Rect], min_w: int,
 
 def work_areas() -> list[Rect]:
     """Áreas de trabajo de cada monitor (Windows); la principal primero. [] fuera de Windows."""
+    import sys
+
+    if sys.platform != "win32":
+        return []
     try:
         import ctypes
         from ctypes import wintypes

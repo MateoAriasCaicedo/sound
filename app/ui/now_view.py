@@ -32,7 +32,7 @@ from .anim import ease_in_out, ease_out
 from .icons import icon_mask
 from .playback import fmt
 from .theme import blend, readable_on, seed_color, vivid
-from .widgets import HEART, PointerTip, _layer, _Painted, bind_touchpad, elide, touchpad_deltas
+from .widgets import HEART, PointerTip, _layer, _Painted, bind_touchpad, bind_wheel, elide, touchpad_deltas
 
 TABS = (("album", "Álbum"), ("lyrics", "Letra"), ("queue", "A continuación"))
 RADIO_TABS = (("stations", "Emisoras"),)
@@ -381,7 +381,7 @@ class NowView(tk.Canvas):
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", self._leave)
         self.bind("<ButtonRelease-1>", self._click)
-        self.bind("<MouseWheel>", self._wheel)
+        bind_wheel(self, self._wheel)
         bind_touchpad(self, self._touchpad)
         app.scale.bind("<Configure>", self._bar_moved, add="+")
         self.anim.add_loop(self._frame)

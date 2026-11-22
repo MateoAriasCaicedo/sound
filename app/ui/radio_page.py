@@ -22,7 +22,7 @@ from .page import Page
 from .radio import art_track
 from .theme import FONT_FAMILY, blend, seed_color
 from .welcome import SuggestionTile, _disc, fit_count
-from .widgets import ChipBar, Field, bind_touchpad, touchpad_deltas
+from .widgets import ChipBar, Field, bind_touchpad, bind_wheel, touchpad_deltas
 
 log = _log.get("ui")
 TAGS = (("news", "Noticias"), ("pop", "Pop"), ("rock", "Rock"), ("salsa", "Salsa"),
@@ -209,7 +209,7 @@ class RadioPage(Page):
             scrollregion=self.outer.bbox("all")))
         self.outer.bind("<Configure>", self._resized)
         for widget in (self.outer, self.inner, self.info):
-            widget.bind("<MouseWheel>", self._wheel)
+            bind_wheel(widget, self._wheel)
             bind_touchpad(widget, self._touchpad)
         self.credit = tk.Label(b, anchor="w", justify="left", font=f["small"], text=CREDIT)
         self.credit.grid(row=4, column=0, sticky="ew", pady=(int(10 * k), 0))
@@ -335,7 +335,7 @@ class RadioPage(Page):
                                self._favorite)
             if self._colors:
                 tile.restyle(**self._colors)
-            tile.bind("<MouseWheel>", self._wheel, add="+")
+            bind_wheel(tile, self._wheel, add=True)
             bind_touchpad(tile, self._touchpad, add=True)
             self.tiles.append(tile)
         while len(self.tiles) > len(self.stations):
@@ -361,7 +361,7 @@ class RadioPage(Page):
                            lambda _t: None)
             if self._colors:
                 tile.restyle(**self._colors)
-            tile.bind("<MouseWheel>", self._wheel, add="+")
+            bind_wheel(tile, self._wheel, add=True)
             bind_touchpad(tile, self._touchpad, add=True)
             self.tiles.append(tile)
         while len(self.tiles) > len(self.stations):

@@ -59,6 +59,11 @@ class AppUpdateMixin:
     def _maybe_check_app_update(self, manual: bool = False) -> None:
         """Pregunta a GitHub en segundo plano. Sin `manual`: solo en la app instalada, si está
         activado y si hace más de un día de la última vez."""
+        if not app_update.supported():
+            self.app_update_note = ("Las actualizaciones automáticas solo están disponibles en "
+                                    "Windows.")
+            self._app_update_changed()
+            return
         if self.app_update_state in ("checking", "downloading", "installing"):
             return
         if not manual:
@@ -118,8 +123,8 @@ class AppUpdateMixin:
         release = self.app_update
         if release is None or self.app_update_state in ("downloading", "installing"):
             return
-        if not config.is_frozen() or not release.installable:
-            # desde el código no se instala nada; sin suma publicada, se descarga a mano
+        if not config.is_frozen() or not release.installable or not app_update.supported():
+            # desde el código (o fuera de Windows) no se instala nada: se abre la página
             webbrowser.open(release.page_url)
             return
         size = f" ({release.installer_size / 1_048_576:.0f} MB)" if release.installer_size else ""

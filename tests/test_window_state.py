@@ -1,4 +1,7 @@
 """Ventana recordada entre sesiones y teclas multimedia (funciones sin Tk)."""
+import sys
+
+from app.ui import window_state
 from app.ui.main import App
 from app.ui.window_state import fit, parse
 
@@ -28,6 +31,12 @@ def test_window_never_exceeds_the_work_area_nor_goes_below_the_minimum():
     assert fit((300, 200, 100, 100), [MAIN], 880, 560)[:2] == (880, 560)
     w, h, x, y = fit((1120, 720, 1500, 900), [MAIN], 880, 560)  # se salía por abajo a la derecha
     assert x + w <= 1920 and y + h <= 1040
+
+
+def test_work_areas_is_empty_outside_windows(monkeypatch):
+    """En Linux/macOS no existen las API de monitores de Windows: se usa la pantalla de Tk."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert window_state.work_areas() == []
 
 
 class _FakePlayer:

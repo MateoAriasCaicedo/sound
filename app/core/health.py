@@ -256,6 +256,22 @@ def diagnostics(
     node = which("node")
     add("Node.js", "ok" if node else "fail",
         node or "falta: YouTube lo necesita para resolver los enlaces")
+    if sys.platform == "win32":
+        add("Reproductor", "ok", "Media Foundation")
+    else:
+        try:
+            import gi
+
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+
+            Gst.init(None)
+            if Gst.ElementFactory.find("playbin") is None:
+                raise RuntimeError("GStreamer no tiene playbin")
+            add("Reproductor", "ok", "GStreamer (playbin)")
+        except Exception:  # noqa: BLE001 - sin esto no se puede reproducir nada
+            add("Reproductor", "fail",
+                "falta GStreamer: instala python3-gi y gstreamer1.0-plugins-base/good/bad/ugly")
     ffmpeg = which("ffmpeg")
     add("ffmpeg", "ok" if ffmpeg else "warn",
         ffmpeg or "opcional: sin él no hay forma de onda real ni normalización de volumen")
