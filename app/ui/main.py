@@ -2929,7 +2929,9 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self.drawer_sub.configure(text=sub)
         if self.now_view is not None:
             if self.lyrics_enabled:
-                self.now_view.set_lyrics(payload, message)
+                retry = ("Volver a intentarlo", self._retry_lyrics) \
+                    if message == "No se pudo buscar la letra." else None
+                self.now_view.set_lyrics(payload, message, retry)
             else:  # se ofrece activarlas ahí mismo, pero diciendo antes qué se envía y a quién
                 self.now_view.set_lyrics(None, LYRICS_NOTICE, ("Activar letras", self.toggle_lyrics))
 
@@ -2979,6 +2981,10 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self._lyrics_publish(payload, sub="Sincronizada" if payload.get("synced")
                                  else "Letra sin tiempos")
         self._sync_lyrics(force=True)
+
+    def _retry_lyrics(self) -> None:
+        self._lyrics_vid = None
+        self._load_lyrics(self.cur_track)
 
     def _sync_lyrics(self, force: bool = False) -> None:
         if not self._lyrics_payload or not self.player.loaded:
@@ -3448,6 +3454,32 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         liked = self.now.liked
         self.now_view.set_track(t, liked, self._play_context(), self.now.artist_link,
                                 self._now_album_key() is not None)
+        self.now_view.set_facts(self._now_facts())
+
+    def _now_facts(self) -> list[tuple[str, str]]:
+        """«Sobre esta canción» en la vista en grande, para cuando no tiene letra."""
+        from .now_view import added_text, plays_text
+        t = self.cur_track
+        if t is None:
+            return []
+        base = self.lib_by_id.get(t["video_id"]) or t
+        facts = []
+        genre = self._genre_of(t)
+        if genre:
+            facts.append(("Género", genre))
+        if base.get("duration"):
+            facts.append(("Duración", fmt(base["duration"])))
+        try:
+            facts.append(("Escuchada", plays_text(history.play_counts().get(t["video_id"], 0))))
+        except Exception as exc:  # noqa: BLE001 - sin historial, un dato menos
+            _log.failure(log, "no se pudieron contar las escuchas", exc)
+        if t["video_id"] in self.lib_by_id:
+            added = added_text(base.get("added_at"))
+            if added:
+                facts.append(("En tu biblioteca", f"desde el {added}"))
+        else:
+            facts.append(("Suena desde", "YouTube, sin descargar"))
+        return facts
 
     def _now_stations(self) -> None:
         """Con la radio, las emisoras de la lista desde la que se eligió (las de ⏮ ⏭)."""

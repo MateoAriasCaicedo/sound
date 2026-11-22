@@ -6,7 +6,9 @@ El fondo es la portada muy desenfocada, oscurecida en el tema oscuro y aclarada 
 abajo se funde con el color de la ventana. A la izquierda van la portada grande, el título, el
 artista y el álbum; a la derecha, tres pestañas: las canciones de ese álbum que tienes, la letra
 sincronizada (la línea que suena, en el color de la portada) y lo que sigue en la cola. Con
-una emisora, una sola pestaña: las emisoras de la lista desde la que se eligió.
+una emisora, una sola pestaña: las emisoras de la lista desde la que se eligió. Si una canción
+no tiene letra, la pestaña no queda vacía: lo dice, cuenta algo de la canción y enseña lo que
+viene después.
 
 Todo se dibuja en un único Canvas para que el texto quede directamente sobre el fondo, sin cajas.
 El panel de la derecha se desplaza moviendo sus elementos; arriba y abajo lo tapan dos tiras del
@@ -16,6 +18,7 @@ La ventana le pasa los datos (`set_track`, `set_art`, `set_album`, `set_queue`, 
 con la radio, `set_radio`, `set_live` y `set_stations`) y llama a `sync` en cada tick: la vista
 no lee por su cuenta el estado de la reproducción.
 """
+import datetime
 import math
 import time
 import tkinter as tk
@@ -38,6 +41,16 @@ ART_MS = 460
 FRAME_S = 0.045        # los fundidos de imágenes grandes se pintan, como mucho, cada 45 ms
 FOLLOW_PAUSE_S = 4.0   # tras mover la letra a mano, deja de seguir la canción un rato
 QUEUE_LIMIT = 60       # filas de la cola que se dibujan; el resto se resume
+NEXT_IN_EMPTY = 3      # canciones de la cola que se ven donde iría una letra que no hay
+MONTHS = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic")
+# avisos que sustituyen a la letra: titular y explicación (los demás se parten por la 1.ª frase)
+EMPTY_TEXT = {
+    "Sin letra para esta canción.": (
+        "Esta canción no tiene letra",
+        "Puede ser instrumental, o que LRCLIB todavía no tenga la suya."),
+    "No se pudo buscar la letra.": (
+        "No se pudo buscar la letra", "No hay conexión con LRCLIB ahora mismo."),
+}
 
 
 # ---------- cálculos sin Tk ----------
@@ -55,6 +68,36 @@ def wrap_two(font, text: str, width: int) -> list[str]:
             return [elide(font, line, width), elide(font, " ".join(words[i:]), width)]
         line = trial
     return [elide(font, text, width)]  # una sola palabra larguísima
+
+
+def empty_lyrics_text(message: str) -> tuple[str, str]:
+    """El aviso que sustituye a la letra, partido en titular y explicación."""
+    if message in EMPTY_TEXT:
+        return EMPTY_TEXT[message]
+    head, sep, rest = message.partition(". ")
+    if sep:
+        return head, rest.strip()
+    return message.rstrip("."), ""
+
+
+def added_text(added_at) -> str:
+    """«2026-11-03 19:37:57» (UTC, como lo guarda SQLite) → «3 nov 2026» en hora local.
+    Vacío si no se entiende."""
+    try:
+        when = datetime.datetime.fromisoformat(str(added_at).strip()[:19])
+    except ValueError:
+        return ""
+    try:
+        when = when.replace(tzinfo=datetime.timezone.utc).astimezone()
+    except (OverflowError, OSError, ValueError):
+        pass  # fuera de rango para la hora local: se queda la fecha tal cual
+    return f"{when.day} {MONTHS[when.month - 1]} {when.year}"
+
+
+def plays_text(count: int) -> str:
+    if count <= 0:
+        return "Es la primera vez"
+    return "1 vez" if count == 1 else f"{count} veces"
 
 
 def layout(w: int, h: int, k: float, text_h: int, tab_h: int) -> dict:
@@ -246,6 +289,7 @@ class NowView(tk.Canvas):
             tab=F(self, family=strong, size=11), hdr=F(self, family=strong, size=12),
             row=F(self, family=text, size=10), sub=F(self, family=text, size=9),
             lyric=F(self, family=display, size=17), msg=F(self, family=text, size=11),
+            empty=F(self, family=display, size=18),
         )
 
         # estado que llega de la ventana
@@ -271,6 +315,7 @@ class NowView(tk.Canvas):
         self.lyrics_msg = ""
         self.lyrics_action: tuple | None = None
         self.stations: list[dict] = []
+        self.facts: list[tuple[str, str]] = []  # «Sobre esta canción», si no hay letra
         self.playing = False
         self.position = 0
 
@@ -298,6 +343,7 @@ class NowView(tk.Canvas):
         self._bars_item = None
         self._bars_last = 0.0
         self._bars_idle = False
+        self._empty_photo = None
         self.heart_size, self.heart_box = int(24 * k), int(38 * k)
         self._heart_masks = {name: icon_mask(name, self.heart_size)
                              for name in ("heart", "heart_fill")}
@@ -478,8 +524,18 @@ class NowView(tk.Canvas):
 
     def set_queue(self, entries: list[dict]) -> None:
         self.queue_entries = entries
-        if self._ready() and self._active() == "queue":
+        if self._ready() and (self._active() == "queue" or self._lyrics_empty()):
             self._build_panel(reset=False)
+
+    def set_facts(self, facts: list[tuple[str, str]]) -> None:
+        """Datos de la canción («Género», «Rock») para cuando no tiene letra."""
+        self.facts = facts
+        if self._ready() and self._lyrics_empty():
+            self._build_panel(reset=False)
+
+    def _lyrics_empty(self) -> bool:
+        """Se ve la pestaña «Letra», pero en vez de letra hay un aviso."""
+        return self._active() == "lyrics" and bool(self.lyrics_msg or not self.lyric_lines)
 
     def set_lyrics(self, payload: dict | None, message: str = "",
                    action: tuple | None = None) -> None:
@@ -547,6 +603,7 @@ class NowView(tk.Canvas):
         for name in ("album", "album_u"):
             f[name].configure(size=max(10, min(13, round(title * 0.43))))
         f["lyric"].configure(size=max(14, min(24, round(title * 0.72))))
+        f["empty"].configure(size=max(13, min(20, round(title * 0.6))))
         row = 10 if h < 820 * k else 11
         f["row"].configure(size=row)
         f["sub"].configure(size=row - 1)
@@ -1010,8 +1067,7 @@ class NowView(tk.Canvas):
     def _build_lyrics(self, x0: int, x1: int, base: float) -> int:
         k = self.k
         if self.lyrics_msg or not self.lyric_lines:
-            return self._message(x0, x1, base, int(4 * k), self.lyrics_msg or
-                                 "Sin letra para esta canción.", self.lyrics_action)
+            return self._build_empty(x0, x1, base)
         gap = int(14 * k)
         y = int(6 * k)
         seek = self.on["seek"]
@@ -1027,6 +1083,77 @@ class NowView(tk.Canvas):
             row["y1"] = y + h + gap // 2
             y += h + gap
         return y + int(40 * k)
+
+    def _build_empty(self, x0: int, x1: int, base: float) -> int:
+        """Sin letra: un aviso con su icono, «Sobre esta canción» y lo que viene después."""
+        k, f = self.k, self.f
+        y = int(6 * k)
+        side = int(40 * k)
+        icon = _layer(icon_mask("note", side, stroke=1.3), self.c["faint"])
+        self._empty_photo = ImageTk.PhotoImage(icon)
+        row = self._row(y, side)
+        item = self.create_image(x0, base + y, image=self._empty_photo, anchor="nw",
+                                 tags=("panel",))
+        row["items"].append((item, None))
+        y += side + int(16 * k)
+        head, detail = empty_lyrics_text(self.lyrics_msg or "Sin letra para esta canción.")
+        row = self._row(y, 0)
+        item = self._text(row, x0, base + y, head, f["empty"], "fg", anchor="nw", width=x1 - x0)
+        box = self.bbox(item)
+        y += (box[3] - box[1]) if box else f["empty"].metrics("linespace")
+        if detail:
+            y += int(6 * k)
+            item = self._text(row, x0, base + y, detail, f["msg"], "dim", anchor="nw",
+                              width=x1 - x0)
+            box = self.bbox(item)
+            y += (box[3] - box[1]) if box else f["msg"].metrics("linespace")
+        row["y1"] = y
+        y += int(14 * k)
+        if self.lyrics_action:
+            label, callback = self.lyrics_action
+            link_h = f["tab"].metrics("linespace") + int(8 * k)
+            link = self._row(y - int(4 * k), link_h, action=callback)
+            self._text(link, x0, base + y, label, f["tab"], "accent", anchor="nw")
+            y += link_h + int(8 * k)
+        if self.facts:
+            y = self._section(x0, base, y + int(18 * k), "Sobre esta canción")
+            label_w = max(f["sub"].measure(label) for label, _value in self.facts) + int(20 * k)
+            line_h = f["row"].metrics("linespace") + int(10 * k)
+            for label, value in self.facts:
+                row = self._row(y, line_h)
+                cy = base + y + line_h / 2
+                self._text(row, x0, cy, label, f["sub"], "dim")
+                self._text(row, x0 + label_w, cy, elide(f["row"], value, x1 - x0 - label_w),
+                           f["row"], "fg")
+                y += line_h
+        upcoming = [e for e in self.queue_entries if e["kind"] in ("up", "ctx")][:NEXT_IN_EMPTY]
+        if upcoming:
+            y = self._section(x0, base, y + int(22 * k), "Después suena")
+            h = int(46 * k)
+            for e in upcoming:
+                t = e["track"]
+                title = elide(f["row"], t["title"], x1 - x0 - int(8 * k))
+                row = self._row(y, h, action=lambda kind=e["kind"], idx=e["idx"]:
+                                self.on["queue"](kind, idx),
+                                tip=t["title"] if title != t["title"] else None)
+                self._text(row, x0, base + y + int(15 * k), title, f["row"],
+                           "dim" if e.get("offline") else "fg")
+                self._text(row, x0, base + y + int(33 * k),
+                           elide(f["sub"], t.get("artist") or "", x1 - x0), f["sub"], "dim")
+                y += h
+            link_h = f["tab"].metrics("linespace") + int(8 * k)
+            link = self._row(y + int(6 * k), link_h, action=lambda: self.show_tab("queue"))
+            self._text(link, x0, base + y + int(10 * k), "Ver toda la cola", f["tab"], "accent",
+                       anchor="nw")
+            y += link_h + int(10 * k)
+        return y + int(24 * k)
+
+    def _section(self, x0: int, base: float, y: int, title: str) -> int:
+        """Un rótulo en versalitas, como los de la cola. Devuelve dónde sigue el contenido."""
+        k = self.k
+        row = self._row(y, int(26 * k))
+        self._text(row, x0, base + y + int(13 * k), title.upper(), self.f["head"], "faint")
+        return y + int(30 * k)
 
     # ---------- letra sincronizada ----------
     def _sync_lyric(self, force: bool = False, animate: bool = True) -> None:

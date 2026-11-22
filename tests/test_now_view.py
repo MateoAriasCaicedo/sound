@@ -2,7 +2,17 @@
 from PIL import Image
 
 from app.ui import theme
-from app.ui.now_view import _percentile, artwork, layout, scene_colors, tone_backdrop, wrap_two
+from app.ui.now_view import (
+    _percentile,
+    added_text,
+    artwork,
+    empty_lyrics_text,
+    layout,
+    plays_text,
+    scene_colors,
+    tone_backdrop,
+    wrap_two,
+)
 
 
 class _Font:
@@ -96,3 +106,20 @@ def test_artwork_has_room_for_its_shadow():
     assert img.width == 300 + 2 * pad and img.height > img.width  # la sombra cae hacia abajo
     assert img.getpixel((pad + 150, pad + 150))[3] == 255
     assert img.getpixel((0, 0))[3] < 20
+
+
+def test_empty_lyrics_text_splits_headline_and_explanation():
+    head, detail = empty_lyrics_text("Sin letra para esta canción.")
+    assert head == "Esta canción no tiene letra" and "instrumental" in detail
+    assert empty_lyrics_text("Buscando letra…") == ("Buscando letra…", "")
+    head, detail = empty_lyrics_text("Las letras están desactivadas. Al activarlas, se envían.")
+    assert head == "Las letras están desactivadas" and detail == "Al activarlas, se envían."
+
+
+def test_added_text_and_plays_text():
+    import datetime
+    when = datetime.datetime(2026, 11, 3, 19, 37, 57, tzinfo=datetime.timezone.utc).astimezone()
+    assert added_text("2026-11-03 19:37:57") == f"{when.day} nov 2026"  # en hora local
+    assert added_text(None) == "" and added_text("ayer") == ""
+    assert plays_text(0) == "Es la primera vez"
+    assert plays_text(1) == "1 vez" and plays_text(12) == "12 veces"

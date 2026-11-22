@@ -1,5 +1,14 @@
 # Cambios
 
+## Sin publicar
+
+### Vista en grande
+- **La pestaña «Letra» ya no queda vacía** cuando una canción no tiene letra: lo dice claro
+  (puede ser instrumental, o que LRCLIB no la tenga), cuenta algo de la canción (género,
+  duración, cuántas veces la has escuchado y desde cuándo está en tu biblioteca) y enseña las
+  tres siguientes de la cola, con un enlace a la cola entera. Si no se pudo buscar por falta de
+  conexión, ofrece volver a intentarlo.
+
 ## 1.4.1 — 2026-11-21
 
 ### Vista en grande
