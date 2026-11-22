@@ -15,8 +15,13 @@ from __future__ import annotations
 
 import time
 
+from PIL import Image, ImageOps
+
 from ..core import log as _log
 from ..core import radio as radio_store
+from .icons import icon_mask
+from .theme import blend, luminance
+from .widgets import _layer
 
 log = _log.get("ui")
 OPEN_TIMEOUT_S = 15   # sin empezar a sonar en este tiempo, la emisora no responde
@@ -37,6 +42,39 @@ def live_text(seconds: float) -> str:
 def art_track(station: dict) -> dict:
     """La emisora como «canción» para pedir su logo (la caché de portadas va por identificador)."""
     return {"video_id": f"radio-{station['uuid']}", "cover": station.get("favicon")}
+
+
+def station_poster(logo: Image.Image | None, color: str, size: int = 480) -> Image.Image:
+    """La «portada» de una emisora: su logo centrado sobre un degradado de su color (sin logo,
+    el dibujo de la radio). Un logo oscuro con transparencia va sobre un fondo claro."""
+    ramp = Image.linear_gradient("L").rotate(35).crop((48, 48, 208, 208)).resize((size, size))
+    dark_logo = False
+    if logo is not None:
+        logo = logo.convert("RGBA")
+        small = logo.copy()
+        small.thumbnail((48, 48))
+        alpha = small.getchannel("A").tobytes()
+        if min(alpha) < 250:  # con transparencia: ¿lo que se ve es oscuro?
+            seen = sum(alpha)
+            gray = small.convert("L").tobytes()
+            dark_logo = bool(seen) and sum(g * a for g, a in zip(gray, alpha)) / seen < 90
+    if dark_logo:
+        low, high = blend(color, "#ffffff", 0.72), blend(color, "#ffffff", 0.9)
+    else:
+        low, high = blend(color, "#000000", 0.5), blend(color, "#000000", 0.12)
+    back = ImageOps.colorize(ramp, low, high).convert("RGBA")
+    if logo is None:
+        mask = icon_mask("radio", int(size * 0.34))
+        glyph = _layer(mask.point(lambda v: round(v * 0.85)),
+                       "#ffffff" if luminance(high) < 0.5 else "#000000")
+        back.alpha_composite(glyph, ((size - glyph.width) // 2, (size - glyph.height) // 2))
+        return back.convert("RGB")
+    longest = max(logo.width, logo.height)
+    scale = min(size * 0.58 / longest, 5.0)  # uno diminuto no se estira hasta verse borroso
+    logo = logo.resize((max(1, round(logo.width * scale)), max(1, round(logo.height * scale))),
+                       Image.LANCZOS)
+    back.alpha_composite(logo, ((size - logo.width) // 2, (size - logo.height) // 2))
+    return back.convert("RGB")
 
 
 class RadioMixin:
@@ -91,6 +129,9 @@ class RadioMixin:
         self._load_cover(art_track(station), None, token)
         self._radio_connect()
         self._radio_page_changed()
+        if self.now_open:  # la vista en grande pasa a la emisora (y a su lista)
+            self._now_track()
+            self._now_stations()
 
     def _radio_connect(self) -> None:
         station = self.radio_station

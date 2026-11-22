@@ -9,8 +9,8 @@ Sound funciona en el equipo del usuario. No tiene cuentas, telemetría ni servid
 - Preferencias y sesión de reproducción: `ui_prefs.json` y `ui_session.json` en la misma carpeta.
 - Canciones y carátulas: `%USERPROFILE%\Music\Sound`.
 - Formas de onda, volumen medido, letras consultadas y registro de errores:
-  `%LOCALAPPDATA%\Sound\cache` y `%LOCALAPPDATA%\Sound\sound.log`. Las letras solo se guardan si
-  el usuario activa esa opción.
+  `%LOCALAPPDATA%\Sound\cache` y `%LOCALAPPDATA%\Sound\sound.log`. Las letras solo se guardan
+  mientras esa opción esté activada.
 - Sugerencias de «Descubre en YouTube» de la última vez: `%LOCALAPPDATA%\Sound\discover.json`.
 
 El registro puede contener rutas de archivos, títulos de canciones, identificadores de vídeo y
@@ -35,8 +35,10 @@ mensajes de error técnicos. No contiene cookies ni contraseñas.
   reproductor de radio.
 - **iTunes Search API**: solo cuando una canción llega sin género; se envía el artista y el
   título para intentar clasificarla.
-- **LRCLIB**: solo si el usuario activa las letras. Se envían el título, el artista, el álbum y la
-  duración de la canción que suena para pedir su letra. La letra se guarda en caché local.
+- **LRCLIB**: mientras las letras estén activadas (lo están de serie; se desactivan en Ajustes ›
+  Reproducción). Se envían el título, el artista, el álbum y la duración de la canción que suena
+  para pedir su letra; si esa versión solo tiene el texto, también se busca por el título sin la
+  coletilla de versión («(Main Version)», «- Remastered»…). La letra se guarda en caché local.
 - **PyPI**: al usar «Actualizar yt-dlp», se consulta la versión publicada y se descarga el wheel
   oficial.
 

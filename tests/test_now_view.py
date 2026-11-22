@@ -78,6 +78,16 @@ def test_scene_colors_meet_contrast_on_both_themes():
             assert theme.contrast(c["fg"], c["bg"]) >= 7
             assert theme.contrast(c["dim"], c["bg"]) >= 4.5
             assert theme.contrast(c["accent"], c["bg"]) >= 4.5
+            assert theme.contrast(c["lyric"], c["bg"]) >= 4.5
+
+
+def test_the_current_lyric_line_has_its_own_color_even_without_a_cover_color():
+    for dark, pal in ((True, theme.DARK), (False, theme.LIGHT)):
+        small = tone_backdrop(None, "cancion", (1200, 600), dark, pal["bg"])
+        for color in (theme.vivid("#e53935"), None):  # con color de portada y sin él
+            c = scene_colors(small, pal, dark, color)
+            assert c["lyric"] not in (c["fg"], c["dim"], c["faint"])
+            assert theme.contrast(c["lyric"], c["bg"]) >= 4.5
 
 
 def test_artwork_has_room_for_its_shadow():

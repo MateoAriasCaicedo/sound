@@ -27,6 +27,7 @@ from ..core import cookies as cookies_store
 from ..core import log as _log
 from ..core import lyrics as lyrics_store
 from ..core import playlists as playlists_store
+from ..core import radio as radio_store
 from ..core.filters import fold
 from . import home, prefs, session, window_state
 from .anim import Animator, ease_in_out
@@ -45,7 +46,7 @@ from .playback import FADE_TICK_MS, PlaybackMixin, fmt
 from .player import Player
 from .playlists_ui import PlaylistsMixin
 from .playqueue import PlayQueue
-from .radio import RadioMixin
+from .radio import RadioMixin, station_poster
 from .search import SearchMixin
 from .sleep_timer import SleepTimerMixin
 from .stations import StationsMixin
@@ -203,7 +204,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         # pantalla «Reproduciendo» (la canción en grande), creada la primera vez que se abre
         self.now_view = None
         self.fullscreen = False
-        self._now_tab = str(self.prefs.get("now_tab") or "album")
+        self._now_tab = str(self.prefs.get("now_tab") or "lyrics")
         self._play_from = ""  # de dónde salió la cola: «Álbum «Rumours»», «Me gusta»…
         # view_pref: la vista elegida (se guarda); view_mode: la que se ve ahora. Solo difieren
         # con un álbum abierto, que siempre se muestra como lista de canciones.
@@ -252,7 +253,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         self.queue_why: dict[str, str] = {}  # por qué la cola automática eligió cada canción
         self.radio_seed: dict | None = None  # canción desde la que se pidieron las similares
         self.drawer_mode = "queue"  # queue | lyrics
-        self.lyrics_enabled = bool(self.prefs.get("lyrics", False))
+        self.lyrics_enabled = bool(self.prefs.get("lyrics", True))
         self.var_lyrics = tk.BooleanVar(value=self.lyrics_enabled)
         self._lyrics_vid: str | None = None
         self._lyrics_payload: dict | None = None
@@ -2135,6 +2136,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         if self.radio_on:
             self.now.set_liked(self.radio_station["uuid"] in self.radio_favs, pop=pop)
             self.now.set_artist_link(False)
+            if self.now_view is not None:
+                self.now_view.set_links(self.now.liked, False, False, pop=pop)
             return
         t = self.cur_track
         if t is None or t["video_id"] not in self.lib_by_id:
@@ -2912,7 +2915,7 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
     def _lyrics_wanted(self) -> bool:
         """La letra se ve en el panel lateral o en la pestaña «Letra» de la vista en grande."""
         return ((self.queue_win is not None and self.drawer_mode == "lyrics")
-                or (self.now_open and self.now_view.tab == "lyrics"))
+                or (self.now_open and self.now_view.tab == "lyrics" and not self.radio_on))
 
     def _lyrics_publish(self, payload: dict | None = None, message: str = "",
                         sub: str | None = None) -> None:
@@ -2950,9 +2953,12 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         cached = lyrics_store.cached(vid)
         if cached is not None:
             self._apply_lyrics(vid, cached)
-            return
-        self._lyrics_publish(message="Buscando letra…")
-        self.status.configure(text="Buscando la letra…")
+            if not lyrics_store.stale(cached):
+                return
+            # se vuelve a mirar por detrás (p. ej. había solo texto y quizá ya hay tiempos)
+        else:
+            self._lyrics_publish(message="Buscando letra…")
+            self.status.configure(text="Buscando la letra…")
         token = self.play_token
 
         def work() -> None:
@@ -3364,14 +3370,12 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
     def toggle_now_view(self) -> None:
         if self.now_open:
             self.close_now_view()
-        elif self.radio_on:
-            self.status.configure(text="La vista en grande es para canciones; la radio suena "
-                                       "en directo")
         else:
             self.open_now_view()
 
     def open_now_view(self) -> None:
-        """Portada, álbum, letra y cola de lo que suena, sobre la portada desenfocada."""
+        """Portada, álbum, letra y cola de lo que suena, sobre la portada desenfocada (con la
+        radio, el logo de la emisora y las emisoras de su lista)."""
         if self.now_open:
             return
         if self.now_view is None:
@@ -3380,9 +3384,10 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
                 close=self.close_now_view, fullscreen=self.toggle_fullscreen,
                 like=self.like_current, artist=self._now_open_artist,
                 album=self._now_open_album, play_album=self._now_play_album,
-                queue=self._play_queue_entry, seek=self._seek_ms, tab=self._now_tab_changed))
+                queue=self._play_queue_entry, seek=self._seek_ms, tab=self._now_tab_changed,
+                station=self.play_station))
             self.now_view.tab = self._now_tab if self._now_tab in ("album", "lyrics", "queue") \
-                else "album"
+                else "lyrics"
             self.now_view.set_fullscreen(self.fullscreen)
         if self.queue_win is not None:  # el panel lateral quedaría debajo
             self._show_queue()
@@ -3393,7 +3398,8 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         view.set_art(img, seed, getattr(self, "_cover_color", None))
         self._now_album()
         self._now_queue()
-        if view.tab == "lyrics":  # antes de abrir: así no asoma un aviso que no toca
+        self._now_stations()
+        if view.tab == "lyrics" and not self.radio_on:  # antes de abrir: sin avisos que no tocan
             self._load_lyrics(self.cur_track)
         view.open()
         self.btn_stage.set_on(True)
@@ -3432,10 +3438,28 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
             self.now_view.set_fullscreen(self.fullscreen)
 
     def _now_track(self) -> None:
+        if self.radio_on:
+            station = self.radio_station
+            self.now_view.set_radio(radio_store.short_name(station), radio_store.subtitle(station),
+                                    self.time.cget("text"), station["uuid"] in self.radio_favs,
+                                    "Radio en directo")
+            return
         t = self.cur_track
         liked = self.now.liked
         self.now_view.set_track(t, liked, self._play_context(), self.now.artist_link,
                                 self._now_album_key() is not None)
+
+    def _now_stations(self) -> None:
+        """Con la radio, las emisoras de la lista desde la que se eligió (las de ⏮ ⏭)."""
+        if self.now_view is None or not self.radio_on:
+            return
+        here = self.radio_station["uuid"]
+        stations = self.radio_list or self._radio_favorites()
+        if here not in {s["uuid"] for s in stations}:
+            stations = [self.radio_station] + list(stations)
+        self.now_view.set_stations([
+            dict(station=s, title=radio_store.short_name(s), sub=radio_store.subtitle(s),
+                 current=s["uuid"] == here) for s in stations])
 
     def _play_context(self) -> str:
         """De dónde viene lo que suena, para la cabecera de la vista en grande."""
@@ -3579,7 +3603,10 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         if self.mini_on and self.mini is not None:
             self.mini.sync()
         self._sync_system_media()
-        if self.now_open:  # la línea de la letra y las barras de lo que suena
+        if self.now_open and self.radio_on:  # «En directo · 12:34» bajo el nombre
+            self.now_view.set_live(self.time.cget("text"))
+            self.now_view.sync(0, playing)
+        elif self.now_open:  # la línea de la letra y las barras de lo que suena
             try:
                 position = self.player.position() if self.player.loaded else self.resume_position
             except Exception:  # noqa: BLE001 - la vista en grande no debe parar el tick
@@ -3837,18 +3864,21 @@ class App(tk.Tk, NavigationMixin, HeroMixin, DragMixin, AppUpdateMixin, ChromeMi
         from PIL import Image
         self._cover_data = data
         img = None
+        station = self.radio_on and self.cur_track is None
         if data:
-            try:
-                img = Image.open(io.BytesIO(data)).convert("RGB")
+            try:  # un logo de emisora conserva su transparencia: va sobre un color
+                img = Image.open(io.BytesIO(data)).convert("RGBA" if station else "RGB")
             except Exception as exc:  # noqa: BLE001 - imagen corrupta: se usa el degradado
                 _log.failure(log, "portada ilegible", exc)
         seed = self.cur_track["video_id"] if self.cur_track else (
             f"radio-{self.radio_station['uuid']}" if self.radio_on else None)
+        color = (dominant_color(img) if img else None) or (seed_color(seed) if seed else None)
+        if station:  # el logo (pequeño y casi nunca cuadrado) centrado sobre su color
+            img = station_poster(img, color)
         self.cover.show(img, seed)
         self._cover_img = (img, seed)
         if self.mini is not None:
             self.mini.show_cover(img, seed)
-        color = (dominant_color(img) if img else None) or (seed_color(seed) if seed else None)
         self._cover_color = color
         if self.cur_track is not None:
             self._system_media_track(self.cur_track, data)

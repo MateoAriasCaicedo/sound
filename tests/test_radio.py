@@ -40,6 +40,10 @@ def test_short_name_drops_the_technical_tail():
     assert radio.short_name({"name": long}) == "Caracol Radio (Bogotá)"
     assert radio.short_name({"name": "La X Medellín 103.9 FM"}) == "La X Medellín 103.9 FM"
     assert radio.short_name({"name": "XY - Radio"}) == "XY - Radio"  # demasiado corto
+    blu = ("Blu Radio, señal nacional (HJCK, 89.9 MHz FM, Bogotá / HJN42, 96.3 MHz, San Martín, "
+           "Meta / HJM47 103.1 MHz, Algeciras, Huila)")
+    assert radio.short_name({"name": blu}) == "Blu Radio, señal nacional"
+    assert radio.short_name({"name": "Candela Estéreo Bogotá (HJPU 101.9)"}) ==         "Candela Estéreo Bogotá (HJPU 101.9)"  # un paréntesis corto se queda
 
 
 def test_fetch_logo_skips_svg_and_huge_files():
@@ -226,6 +230,7 @@ class _FakeApp(RadioMixin):
         self._init_radio()
         self.player = _Player()
         self.play_token = 0
+        self.now_open = False  # sin vista en grande
         self.playing_vid = "song1"
         self.cur_track = {"video_id": "song1"}
         self.retagged = []
@@ -344,3 +349,20 @@ def test_a_song_leaves_radio_mode():
     app._leave_radio()
     assert not app.radio_on
     assert not app._radio_tick()  # el tick vuelve a ser de canciones
+
+
+def test_station_poster_centers_the_logo_on_its_color_and_keeps_it_readable():
+    from PIL import Image
+
+    from app.ui.radio import station_poster
+    white = Image.new("RGBA", (64, 32), (255, 255, 255, 255))  # logo claro y apaisado
+    out = station_poster(white, "#3060ff", size=200)
+    assert out.size == (200, 200) and out.mode == "RGB"
+    assert out.getpixel((100, 100)) == (255, 255, 255)  # el logo, en el centro
+    assert out.getpixel((4, 100)) != (255, 255, 255)    # alrededor, el color de la emisora
+    black = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+    black.paste((0, 0, 0, 255), (10, 10, 30, 30))       # logo oscuro con transparencia
+    corner = station_poster(black, "#3060ff", size=200).getpixel((4, 4))
+    assert sum(corner) / 3 > 150                          # va sobre un fondo claro
+    glyph = station_poster(None, "#3060ff", size=200)     # sin logo: el dibujo de la radio
+    assert glyph.getpixel((100, 100)) != glyph.getpixel((4, 4))

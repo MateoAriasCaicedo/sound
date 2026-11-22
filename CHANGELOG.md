@@ -1,5 +1,25 @@
 # Cambios
 
+## Sin publicar
+
+### Vista en grande
+- **La radio también se ve en grande**: el logo de la emisora sobre su color, su nombre, la
+  ciudad y los géneros, y «En directo · 12:34». A la derecha, las emisoras de la lista desde la
+  que la elegiste, con la que suena marcada: un clic cambia de emisora. El corazón la guarda en
+  tus favoritas.
+- **La línea de la letra que suena va en color** (el de la portada o, si no tiene, el de Sound):
+  se ve de un vistazo por dónde va la canción.
+- **Las letras vienen activadas de serie** y la vista en grande abre en «Letra». Se desactivan
+  en Ajustes › Reproducción; si ya usabas Sound, se respeta lo que tenías.
+
+### Arreglado
+- **Letras que no avanzaban con la canción.** Si la versión exacta solo tenía el texto en LRCLIB
+  (pasaba con títulos como «I Ran (So Far Away) (Main Version)»), salía sin tiempos. Ahora se
+  busca otra versión de la misma canción con letra sincronizada y casi la misma duración. Las
+  letras ya guardadas sin tiempos se vuelven a mirar una vez.
+- Los nombres de emisora con todas sus frecuencias entre paréntesis («Blu Radio, señal nacional
+  (HJCK, 89.9 MHz FM, …)») se acortan en la barra y en la vista en grande.
+
 ## 1.4.0 — 2026-11-21
 
 ### Navegación

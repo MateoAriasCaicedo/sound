@@ -1,17 +1,20 @@
 """Pantalla «Reproduciendo»: la canción que suena en grande, con su álbum, su letra y la cola.
+Con la radio, la emisora en grande (su logo, nombre y «En directo») y las emisoras de su lista.
 
 Cubre la ventana menos el reproductor (la onda y los controles siguen abajo) y sube desde él.
 El fondo es la portada muy desenfocada, oscurecida en el tema oscuro y aclarada en el claro, que
 abajo se funde con el color de la ventana. A la izquierda van la portada grande, el título, el
 artista y el álbum; a la derecha, tres pestañas: las canciones de ese álbum que tienes, la letra
-sincronizada y lo que sigue en la cola.
+sincronizada (la línea que suena, en el color de la portada) y lo que sigue en la cola. Con
+una emisora, una sola pestaña: las emisoras de la lista desde la que se eligió.
 
 Todo se dibuja en un único Canvas para que el texto quede directamente sobre el fondo, sin cajas.
 El panel de la derecha se desplaza moviendo sus elementos; arriba y abajo lo tapan dos tiras del
 propio fondo, con un degradado, que hacen de recorte.
 
-La ventana le pasa los datos (`set_track`, `set_art`, `set_album`, `set_queue`, `set_lyrics`) y
-llama a `sync` en cada tick: la vista no lee por su cuenta el estado de la reproducción.
+La ventana le pasa los datos (`set_track`, `set_art`, `set_album`, `set_queue`, `set_lyrics`;
+con la radio, `set_radio`, `set_live` y `set_stations`) y llama a `sync` en cada tick: la vista
+no lee por su cuenta el estado de la reproducción.
 """
 import math
 import time
@@ -29,6 +32,7 @@ from .theme import blend, readable_on, seed_color, vivid
 from .widgets import HEART, PointerTip, _layer, _Painted, bind_touchpad, elide, touchpad_deltas
 
 TABS = (("album", "Álbum"), ("lyrics", "Letra"), ("queue", "A continuación"))
+RADIO_TABS = (("stations", "Emisoras"),)
 SLIDE_MS = 300
 ART_MS = 460
 FRAME_S = 0.045        # los fundidos de imágenes grandes se pintan, como mucho, cada 45 ms
@@ -138,6 +142,9 @@ def scene_colors(small: Image.Image, pal: dict, dark: bool, color: str | None) -
     return dict(bg=avg, top=top, fg=fg, dim=readable_on(pal["dim"], avg, 4.5),
                 faint=readable_on(blend(pal["dim"], avg, 0.35), avg, 3.0),
                 accent=readable_on(vivid(color), avg, 4.5) if color else fg,
+                # la línea de la letra que suena: siempre de color (sin el de la portada, el
+                # acento de Sound), para que se vea de un vistazo por dónde va
+                lyric=readable_on(vivid(color or pal["accent"]), avg, 4.5),
                 hover="#ffffff" if dark else "#000000")
 
 
@@ -217,7 +224,8 @@ class NowView(tk.Canvas):
     def __init__(self, app, actions: dict) -> None:
         super().__init__(app, width=1, height=1, highlightthickness=0, bd=0, takefocus=1)
         self.app, self.anim, self.k = app, app.anim, app.k
-        self.on = actions  # close, fullscreen, like, artist, album, play_album, queue, seek, tab
+        # close, fullscreen, like, artist, album, play_album, queue, seek, tab, station
+        self.on = actions
         k = self.k
         families = set(tkfont.families(self))
 
@@ -244,7 +252,8 @@ class NowView(tk.Canvas):
         self.visible = False
         self.fullscreen = False
         self.shown = 0.0
-        self.tab = "album"
+        self.tab = "lyrics"
+        self.mode = "song"  # «song» o «radio» (una emisora en directo)
         self.track: dict | None = None
         self.liked: bool | None = None
         self.context = ""
@@ -261,13 +270,14 @@ class NowView(tk.Canvas):
         self.synced = False
         self.lyrics_msg = ""
         self.lyrics_action: tuple | None = None
+        self.stations: list[dict] = []
         self.playing = False
         self.position = 0
 
         # dibujo
         self.L: dict | None = None
         self.c = dict(bg="#101013", top="#101013", fg="#eeeef2", dim="#92929c",
-                      faint="#7b7b86", accent="#ffffff", hover="#ffffff")
+                      faint="#7b7b86", accent="#ffffff", lyric="#ffffff", hover="#ffffff")
         self._size = (0, 0)
         self._relayout_job = None
         self._shown_frames: tuple | None = None  # (fondo, portada) que se ven ahora
@@ -316,7 +326,7 @@ class NowView(tk.Canvas):
         for painted in (self._close, self._full):
             self.itemconfigure(painted.item, tags=("chrome",))
         self._tabs = {key: self.create_text(0, 0, anchor="nw", font=self.f["tab"], text=label,
-                                            tags=("chrome",)) for key, label in TABS}
+                                            tags=("chrome",)) for key, label in TABS + RADIO_TABS}
         self._tab_line = self.create_rectangle(0, 0, 0, 0, width=0, tags=("chrome",))
         self.tip = PointerTip(self, self.anim, lambda: (blend(self.c["bg"], self.c["fg"], 0.16),
                                                         self.c["fg"]))
@@ -390,9 +400,48 @@ class NowView(tk.Canvas):
                   artist_link: bool, album_link: bool) -> None:
         self.track, self.liked, self.context = track, liked, context
         self.artist_link, self.album_link = artist_link, album_link
+        self._set_mode("song")
+
+    def set_radio(self, name: str, subtitle: str, live: str, favorite: bool,
+                  context: str) -> None:
+        """Una emisora en directo: su nombre como título, la ciudad y los géneros debajo y,
+        en la línea del álbum, «En directo · 12:34». El corazón es el de favoritas."""
+        self.track = {"title": name, "artist": subtitle, "album": live}
+        self.liked, self.context = favorite, context
+        self.artist_link = self.album_link = False
+        self._set_mode("radio")
+
+    def set_live(self, text: str) -> None:
+        """En cada tick con la radio: «En directo · 12:34», «Conectando…», «En pausa»…"""
+        if self.mode != "radio" or self.track is None or self.track.get("album") == text:
+            return
+        self.track["album"] = text
         if self._ready():
-            self._place_chrome()
             self._place_text()
+
+    def set_stations(self, entries: list[dict]) -> None:
+        """Las emisoras de la lista (dict con station, title, sub y current)."""
+        self.stations = entries
+        if self._ready() and self._active() == "stations":
+            self._build_panel(reset=False)
+
+    def _set_mode(self, mode: str) -> None:
+        changed = mode != self.mode
+        self.mode = mode
+        if not self._ready():
+            return
+        self._place_chrome()
+        self._place_text()
+        if changed:  # otras pestañas: se rehacen arriba del todo
+            self._place_tabs(animate=False)
+            self._build_panel(reset=True)
+
+    def _mode_tabs(self) -> tuple:
+        return RADIO_TABS if self.mode == "radio" else TABS
+
+    def _active(self) -> str:
+        """La pestaña que se ve (con la radio, siempre la de emisoras)."""
+        return "stations" if self.mode == "radio" else self.tab
 
     def set_links(self, liked: bool | None, artist_link: bool, album_link: bool,
                   pop: bool = False) -> None:
@@ -424,12 +473,12 @@ class NowView(tk.Canvas):
             self.album_info or {}).get("title")
         self.album_rows, self.album_info = rows, info
         self.album_note, self.album_action, self.current_vid = note, action, current
-        if self._ready() and self.tab == "album":
+        if self._ready() and self._active() == "album":
             self._build_panel(reset=reset)
 
     def set_queue(self, entries: list[dict]) -> None:
         self.queue_entries = entries
-        if self._ready() and self.tab == "queue":
+        if self._ready() and self._active() == "queue":
             self._build_panel(reset=False)
 
     def set_lyrics(self, payload: dict | None, message: str = "",
@@ -451,7 +500,7 @@ class NowView(tk.Canvas):
         self.lyrics_msg, self.lyrics_action = message, action
         self._lyric_index = -1
         self._follow_after = 0.0
-        if self._ready() and self.tab == "lyrics":
+        if self._ready() and self._active() == "lyrics":
             self._build_panel(reset=True)
 
     def sync(self, position_ms: int, playing: bool) -> None:
@@ -461,7 +510,7 @@ class NowView(tk.Canvas):
             self.playing = playing
             self._bars_idle = False
             self.anim.wake()
-        if self._ready() and self.tab == "lyrics":
+        if self._ready() and self._active() == "lyrics":
             self._sync_lyric()
 
     def restyle(self) -> None:
@@ -469,7 +518,7 @@ class NowView(tk.Canvas):
             self._paint_scene(animate=False)
 
     def show_tab(self, tab: str) -> None:
-        if tab not in dict(TABS) or tab == self.tab:
+        if self.mode != "song" or tab not in dict(TABS) or tab == self.tab:
             return
         self.tab = tab
         if self._ready():
@@ -666,9 +715,7 @@ class NowView(tk.Canvas):
             x, y = self.coords(self._heart.item)
             r = self.heart_box // 2
             self._zones.append(dict(group="left", key="heart", box=(x - r, y - r, x + r, y + r),
-                                    action=self.on["like"],
-                                    tip=lambda: "Quitar de Me gusta (Ctrl+L)" if self.liked
-                                    else "Me gusta (Ctrl+L)"))
+                                    action=self.on["like"], tip=self._heart_tip))
         if self.artist_link and self.itemcget(self._artist, "text"):
             self._zones.append(dict(group="left", key="artist", box=self._box(self._artist),
                                     action=self.on["artist"], tip="Ver el artista"))
@@ -676,6 +723,12 @@ class NowView(tk.Canvas):
             self._zones.append(dict(group="left", key="album", box=self._box(self._album),
                                     action=self.on["album"], tip="Abrir el álbum"))
         self._paint_links()
+
+    def _heart_tip(self) -> str:
+        if self.mode == "radio":
+            return ("Quitar de tus emisoras favoritas" if self.liked
+                    else "Añadir a tus emisoras favoritas")
+        return "Quitar de Me gusta (Ctrl+L)" if self.liked else "Me gusta (Ctrl+L)"
 
     def _box(self, *items) -> tuple | None:
         boxes = [self.bbox(i) for i in items if self.itemcget(i, "text")]
@@ -722,11 +775,14 @@ class NowView(tk.Canvas):
         x, y = L["panel_x0"], L["y0"]
         ls = f["tab"].metrics("linespace")
         target = None
-        for key, label in TABS:
+        shown = dict(self._mode_tabs())
+        for key, item in self._tabs.items():
+            self.itemconfigure(item, state="normal" if key in shown else "hidden")
+        for key, label in self._mode_tabs():
             item = self._tabs[key]
             width = f["tab"].measure(label)
             self.coords(item, x, y)
-            active = key == self.tab
+            active = key == self._active()
             hot = self._hot == "tab:" + key
             self.itemconfigure(item, fill=c["fg"] if active or hot else c["dim"])
             if active:
@@ -766,9 +822,12 @@ class NowView(tk.Canvas):
             self.offset = 0.0
         base = L["list_top"] - self.offset
         x0, x1 = L["panel_x0"], L["panel_x1"]
-        if self.tab == "album":
+        tab = self._active()
+        if tab == "stations":
+            height = self._build_stations(x0, x1, base)
+        elif tab == "album":
             height = self._build_album(x0, x1, base)
-        elif self.tab == "queue":
+        elif tab == "queue":
             height = self._build_queue(x0, x1, base)
         else:
             height = self._build_lyrics(x0, x1, base)
@@ -780,7 +839,7 @@ class NowView(tk.Canvas):
         self.tag_raise("mask")
         self.tag_raise("chrome")
         if reset:
-            if self.tab == "lyrics":
+            if tab == "lyrics":
                 self._sync_lyric(force=True, animate=False)
             else:
                 self._reveal_current()
@@ -913,6 +972,41 @@ class NowView(tk.Canvas):
             y += h
         return y
 
+    def _build_stations(self, x0: int, x1: int, base: float) -> int:
+        """Con la radio: las emisoras de la lista; un clic cambia a esa (como ⏮ ⏭)."""
+        k, f = self.k, self.f
+        if not self.stations:
+            return self._message(x0, x1, base, int(4 * k),
+                                 "Elige más emisoras en la página Radio.", None)
+        y = 0
+        row = self._row(y, int(28 * k))
+        self._text(row, x0, base + y + int(14 * k), f"EN ESTA LISTA · {len(self.stations)}",
+                   f["head"], "faint")
+        y += int(28 * k)
+        text_x = x0 + int(32 * k)
+        h = int(50 * k)
+        for e in self.stations[:QUEUE_LIMIT]:
+            current = bool(e.get("current"))
+            room = x1 - text_x - int(16 * k)
+            title = elide(f["row"], e["title"], room)
+            row = self._row(y, h, action=None if current else (
+                lambda station=e["station"]: self.on["station"](station)),
+                tip=e["title"] if title != e["title"] else None, current=current)
+            if current:
+                self._bars_at(x0 + int(12 * k), base + y + h / 2)
+            self._text(row, text_x, base + y + int(16 * k), title, f["row"],
+                       "accent" if current else "fg")
+            self._text(row, text_x, base + y + int(35 * k), elide(f["sub"], e.get("sub") or "",
+                                                                  room), f["sub"], "dim")
+            y += h
+        if len(self.stations) > QUEUE_LIMIT:
+            row = self._row(y, int(32 * k))
+            self._text(row, text_x, base + y + int(16 * k),
+                       f"y {len(self.stations) - QUEUE_LIMIT} más", f["sub"], "dim")
+            y += int(32 * k)
+        return self._message(x0, x1, base, y + int(14 * k),
+                             "⏮ ⏭ pasan a la emisora anterior o siguiente de esta lista.", None)
+
     def _build_lyrics(self, x0: int, x1: int, base: float) -> int:
         k = self.k
         if self.lyrics_msg or not self.lyric_lines:
@@ -947,7 +1041,7 @@ class NowView(tk.Canvas):
             line = row.get("line")
             if line is None:
                 continue
-            role = "fg" if line == index else ("faint" if line < index else "dim")
+            role = "lyric" if line == index else ("faint" if line < index else "dim")
             for item, _role in row["items"]:
                 self.itemconfigure(item, fill=c[role])
         if time.monotonic() >= self._follow_after:
@@ -991,7 +1085,7 @@ class NowView(tk.Canvas):
     def _scroll_by(self, dy: float) -> None:
         if self.L is None:
             return
-        if self.tab == "lyrics":
+        if self._active() == "lyrics":
             self._follow_after = time.monotonic() + FOLLOW_PAUSE_S
         self._scroll_to(self.offset + dy, animate=False)
 
@@ -1068,7 +1162,7 @@ class NowView(tk.Canvas):
                 self._paint_links()
             elif k_ and k_.startswith("tab:"):
                 tab = k_[4:]
-                self.itemconfigure(self._tabs[tab], fill=self.c["fg"] if tab == self.tab or
+                self.itemconfigure(self._tabs[tab], fill=self.c["fg"] if tab == self._active() or
                                    k_ == key else self.c["dim"])
 
     def _set_hover_row(self, row: dict | None) -> None:

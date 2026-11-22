@@ -162,7 +162,8 @@ class SettingsPage(Page):
             self.toggle_normalize)
         self.btn_lyrics = self._switch(
             section, "Letras",
-            "Busca la letra sincronizada en LRCLIB; requiere internet y envía título y artista.",
+            "Busca la letra sincronizada en LRCLIB: requiere internet y envía título, artista, álbum y "
+            "duración de lo que suena.",
             self.toggle_lyrics)
 
     def _build_downloads(self) -> None:
@@ -425,8 +426,8 @@ class SettingsPage(Page):
         app.xfade_ms = 4000
         app.var_normalize.set(False)
         app.normalize = False
-        app.var_lyrics.set(False)
-        app.lyrics_enabled = False
+        app.var_lyrics.set(True)
+        app.lyrics_enabled = True
         app.auto_update = True
         app._ytdlp_checked_at = 0.0
         app.player.set_gain_db(0)

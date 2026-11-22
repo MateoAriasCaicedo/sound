@@ -206,9 +206,12 @@ def remove_favorite(uuid: str, db_path=None) -> None:
 
 def short_name(station: dict) -> str:
     """El nombre sin la coletilla técnica: «Caracol Radio (Bogotá) - 100.9 FM / 810 AM - HJGL…»
-    queda en «Caracol Radio (Bogotá)». Lo largo entero se ve en su tarjeta."""
+    queda en «Caracol Radio (Bogotá)», y un paréntesis larguísimo (sus frecuencias) se quita.
+    Lo largo entero se ve en su tarjeta."""
     name = station.get("name") or ""
     head = re.split(r"\s+[-|–—]\s+", name)[0].strip()
+    # un paréntesis largo es la lista de frecuencias: «Blu Radio, señal nacional (HJCK, 89.9 …)»
+    head = re.sub(r"\s*[(\[][^)\]]{25,}(?:[)\]]|$)", "", head).strip()
     return head if len(head) >= 3 else name
 
 

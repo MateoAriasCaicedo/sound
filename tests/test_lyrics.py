@@ -114,3 +114,67 @@ def test_network_failure_is_not_cached(monkeypatch):
     monkeypatch.setattr(lyrics, "_request", boom)
     assert lyrics.fetch(track()) is None
     assert lyrics.cached("v1") is None
+
+
+def test_base_title_drops_version_tails_only():
+    assert lyrics.base_title("I Ran (So Far Away) (Main Version)") == "I Ran (So Far Away)"
+    assert lyrics.base_title("Bohemian Rhapsody - Remastered 2011") == "Bohemian Rhapsody"
+    assert lyrics.base_title("Tusa (feat. Nicki Minaj) [Official Video]") == "Tusa"
+    assert lyrics.base_title("I Ran (So Far Away)") == "I Ran (So Far Away)"
+    assert lyrics.base_title("(Official Video)") == "(Official Video)"
+
+
+def _ran(duration=304):
+    return {"video_id": "ran", "title": "I Ran (So Far Away) (Main Version)",
+            "artist": "A Flock Of Seagulls", "album": "I Ran (So Far Away)",
+            "duration": duration}
+
+
+def _lrclib(urls):
+    """Como LRCLIB: la versión exacta solo tiene texto; sin la coletilla hay sincronizadas."""
+    def fake(url, timeout):
+        urls.append(url)
+        if "/get?" in url:
+            return {"plainLyrics": "I walk along the avenue", "duration": 303}
+        if "Main+Version" in url:
+            return [{"plainLyrics": "I walk along the avenue", "duration": 303}]
+        return [{"syncedLyrics": "[00:10.00]Corta", "duration": 219},
+                {"syncedLyrics": "[00:20.00]I walk along the avenue", "duration": 305},
+                {"syncedLyrics": "[00:21.00]Otra", "duration": 309}]
+    return fake
+
+
+def test_plain_only_exact_match_looks_for_a_synced_version_of_the_same_length(monkeypatch):
+    urls = []
+    monkeypatch.setattr(lyrics, "_request", _lrclib(urls))
+    payload = lyrics.fetch(_ran())
+    assert payload["synced"] == [(20000, "I walk along the avenue")]
+    assert len(urls) == 3 and "Main" in urls[1] and "Main" not in urls[2]  # get, título, sin coletilla
+
+
+def test_a_synced_version_of_another_length_is_not_used(monkeypatch):
+    monkeypatch.setattr(lyrics, "_request", _lrclib([]))
+    payload = lyrics.fetch(_ran(duration=250))  # ninguna dura casi lo mismo: los tiempos no encajarían
+    assert payload["synced"] == [] and payload["plain"] == "I walk along the avenue"
+
+
+def test_plain_lyrics_saved_before_are_checked_again_once(monkeypatch):
+    lyrics.store("ran", {"synced": [], "plain": "I walk", "source": "lrclib", "at": 1})
+    assert lyrics.stale(lyrics.cached("ran"))
+    urls = []
+    monkeypatch.setattr(lyrics, "_request", _lrclib(urls))
+    assert lyrics.fetch(_ran())["synced"]
+    assert not lyrics.stale(lyrics.cached("ran"))
+    lyrics.store("ran2", {"synced": [], "plain": "Solo texto", "at": 1, "v": lyrics.FORMAT})
+    assert not lyrics.stale(lyrics.cached("ran2"))  # ya se buscó con la regla nueva
+
+
+def test_plain_lyrics_saved_before_survive_a_network_failure(monkeypatch):
+    old = {"synced": [], "plain": "I walk", "source": "lrclib", "at": 1}
+    lyrics.store("ran", old)
+
+    def boom(_url, _timeout):
+        raise OSError("sin red")
+
+    monkeypatch.setattr(lyrics, "_request", boom)
+    assert lyrics.fetch(_ran()) == old

@@ -133,7 +133,8 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 - **Diagnóstico**: en Descargas, con comprobaciones del entorno y accesos a datos y registro.
 - **Radio**: emisoras en directo de todo el mundo (directorio libre Radio Browser), empezando
   por las de tu país, con buscador, listas por género y favoritas. Suenan en el mismo
-  reproductor, con ⏮ ⏭ para cambiar de emisora; no se graban ni se descargan.
+  reproductor, con ⏮ ⏭ para cambiar de emisora, y también se ven en grande (logo, nombre y
+  las emisoras de su lista); no se graban ni se descargan.
 - **Estaciones de Sound**: radios sin fin de un artista, una canción, una lista, tus Me gusta o
   un género. En «Para ti» (página Radio), con «Iniciar radio» en el menú de una canción o en el
   «⋯» de un artista, álbum o lista.
@@ -144,8 +145,9 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
   dejaste» y no suena nada hasta que pulses play.
 - **Exportar y limpiar**: clic derecho en la lista.
 - **Normalizar volumen (ReplayGain)**: clic derecho → «Normalizar volumen» (necesita ffmpeg).
-- **Letras**: pestaña «Letra» en «A continuación». Se activan en Ajustes → Reproducción y se
-  buscan en LRCLIB, así que necesitan internet; se guardan en caché para escucharlas sin conexión.
+- **Letras**: pestaña «Letra» en «A continuación» y en la vista en grande, con la línea que
+  suena en color. Vienen activadas (se desactivan en Ajustes → Reproducción) y se buscan en
+  LRCLIB, así que necesitan internet; se guardan en caché para escucharlas sin conexión.
 - **La interfaz sigue la música**: la onda y el ecualizador usan el volumen real de la canción, y
   el color de la ventana se adelanta a la portada de la siguiente antes del crossfade. La mezcla
   se acorta o alarga según la energía de las dos canciones, y la cola automática evita saltos
@@ -163,7 +165,7 @@ ventana y la CLI pueden trabajar sobre la misma cola a la vez.
 | `discover.json` | — | Sugerencias de «Descubre en YouTube» de la última vez |
 | `sound.log` | `SOUND_LOG` | Registro de errores (rota a 512 KB, 2 copias) |
 | `cache\waves\` | `SOUND_WAVE_DIR` | Onda real de cada canción |
-| `cache\lyrics\` | `SOUND_LYRICS_DIR` | Letras consultadas, si se activan |
+| `cache\lyrics\` | `SOUND_LYRICS_DIR` | Letras consultadas (si están activadas) |
 | `ui_prefs.json` | `SOUND_UI_PREFS` | Tema, volumen, repetición, crossfade, cookies… |
 | `ui_session.json` | `SOUND_UI_SESSION` | Canción, posición y cola de la última sesión |
 | `cache\loudness.json` | `SOUND_LOUDNESS_CACHE` | Ganancia de volumen medida por canción |

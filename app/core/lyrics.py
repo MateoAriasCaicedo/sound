@@ -1,8 +1,13 @@
 """Letras sincronizadas desde LRCLIB (opcional, con caché en disco).
 
-Solo se consulta si el usuario activa la opción: la petición envía título, artista, álbum y
-duración a un servicio de terceros. La respuesta se guarda por canción para no repetirla; un
-«no hay letra» también se recuerda unos días, pero un fallo de red no se cachea.
+Se consulta mientras la opción esté activada (lo está de serie; se apaga en Ajustes): la
+petición envía título, artista, álbum y duración a un servicio de terceros. La respuesta se
+guarda por canción para no repetirla; un «no hay letra» también se recuerda unos días, pero un
+fallo de red no se cachea.
+
+Se prefiere la letra sincronizada: si la versión exacta solo tiene el texto (pasa con títulos
+como «… (Main Version)» o «… - Remastered 2011»), se busca otra versión de la misma canción
+con letra sincronizada y casi la misma duración, para que los tiempos encajen.
 """
 import json
 import re
@@ -22,6 +27,8 @@ log = _log.get("lyrics")
 TIMEOUT_S = 8
 MAX_BYTES = 1024 * 1024
 NEGATIVE_TTL_S = 7 * 24 * 3600
+SYNC_TOLERANCE_S = 3   # otra versión sincronizada vale si dura casi lo mismo que la que suena
+FORMAT = 2             # las guardadas antes, solo con texto, se vuelven a mirar una vez
 BASE = "https://lrclib.net/api"
 USER_AGENT = f"Sound/{__version__} (https://github.com/MateoAriasCaicedo/sound)"
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -29,6 +36,25 @@ _TS = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]")
 _WORD_TS = re.compile(r"<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>")
 _OFFSET = re.compile(r"\[offset:\s*([+-]?\d+)\s*\]", re.I)
 _META = re.compile(r"^\[(ar|ti|al|by|offset|length|re|ve):[^\]]*\]\s*", re.I)
+_BRACKET_TAIL = re.compile(r"\s*[\(\[]([^\(\)\[\]]*)[\)\]]\s*$")
+_DASH_TAIL = re.compile(r"\s+[-–]\s+([^-–]+)$")
+_VERSION_WORDS = re.compile(
+    r"version|versión|remaster|mix\b|edit\b|mono\b|stereo|feat\.?|ft\.|official|oficial|"
+    r"video|audio|lyric|letra|explicit|single|deluxe|bonus", re.I)
+
+
+def base_title(title: str) -> str:
+    """El título sin coletillas de versión: «I Ran (So Far Away) (Main Version)» → «I Ran (So
+    Far Away)», «Song - Remastered 2011» → «Song». Lo que no parece una versión se queda."""
+    text = (title or "").strip()
+    while True:
+        match = _BRACKET_TAIL.search(text) or _DASH_TAIL.search(text)
+        if not match or not _VERSION_WORDS.search(match.group(1)):
+            return text
+        rest = text[:match.start()].rstrip()
+        if not rest:
+            return text
+        text = rest
 
 
 def _cache_path(video_id: str) -> Path:
@@ -88,6 +114,22 @@ def cached(video_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def stale(payload: dict) -> bool:
+    """Si conviene volver a preguntar: un «no hay» de hace días, o un texto sin tiempos
+    guardado antes de que se buscaran otras versiones sincronizadas."""
+    if payload.get("negative"):
+        try:
+            return time.time() - float(payload.get("at") or 0) >= NEGATIVE_TTL_S
+        except (TypeError, ValueError):
+            return True
+    if payload.get("synced"):
+        return False
+    try:
+        return int(payload.get("v") or 1) < FORMAT
+    except (TypeError, ValueError):
+        return True
+
+
 def store(video_id: str, payload: dict) -> None:
     try:
         path = _cache_path(video_id)
@@ -122,7 +164,7 @@ def _payload(found: dict) -> dict | None:
     plain = (found.get("plainLyrics") or "").strip()
     if not synced and not plain:
         return None
-    return {"synced": synced, "plain": plain, "source": "lrclib", "at": time.time()}
+    return {"synced": synced, "plain": plain, "source": "lrclib", "at": time.time(), "v": FORMAT}
 
 
 def _best_match(results: Any, duration: Any) -> dict | None:
@@ -140,6 +182,46 @@ def _best_match(results: Any, duration: Any) -> dict | None:
     return pool[0]
 
 
+def _close_synced(results: Any, duration: Any) -> dict | None:
+    """La versión sincronizada que dura casi lo mismo (si se sabe cuánto dura la canción)."""
+    if not isinstance(results, list) or not isinstance(duration, (int, float)) or duration <= 0:
+        return None
+    close = []
+    for r in results:
+        if not isinstance(r, dict) or not r.get("syncedLyrics"):
+            continue
+        try:
+            gap = abs(float(r.get("duration") or 0) - duration)
+        except (TypeError, ValueError):
+            continue
+        if gap <= SYNC_TOLERANCE_S:
+            close.append((gap, r))
+    return min(close, key=lambda pair: pair[0])[1] if close else None
+
+
+def _search(artist: str, title: str, duration: Any, timeout: float,
+            exact: dict | None) -> dict | None:
+    """Tras `get`: busca una versión sincronizada que encaje, primero con el título tal cual y
+    luego sin la coletilla de versión. Si no la hay, se queda con la exacta (aunque sea solo
+    texto) o, sin ella, con lo más parecido de la búsqueda."""
+    names = [title]
+    base = base_title(title)
+    if base and base.casefold() != title.casefold():
+        names.append(base)
+    loose = None
+    for i, name in enumerate(names):
+        query = {"artist_name": artist, "track_name": name}
+        results = _request(f"{BASE}/search?{urllib.parse.urlencode(query)}", timeout)
+        close = _close_synced(results, duration)
+        if close is not None:
+            return _payload(close)
+        if i == 0:
+            loose = _best_match(results, duration)
+    if exact is not None:
+        return exact
+    return _payload(loose) if loose else None
+
+
 def fetch(track: dict, timeout: float = TIMEOUT_S) -> dict | None:
     """Letra de una canción. None solo si no se pudo preguntar (sin red, título vacío…).
 
@@ -149,14 +231,9 @@ def fetch(track: dict, timeout: float = TIMEOUT_S) -> dict | None:
     if not video_id or not _SAFE_ID.fullmatch(str(video_id)):
         return None
     previous = cached(video_id)
-    if previous is not None:
-        if not previous.get("negative"):
-            return previous
-        try:
-            if time.time() - float(previous.get("at") or 0) < NEGATIVE_TTL_S:
-                return previous
-        except (TypeError, ValueError):
-            pass
+    if previous is not None and not stale(previous):
+        return previous
+    kept = previous if previous is not None and not previous.get("negative") else None
 
     artist = (track.get("artist") or "").strip()
     title = (track.get("title") or "").strip()
@@ -173,17 +250,15 @@ def fetch(track: dict, timeout: float = TIMEOUT_S) -> dict | None:
     try:
         found = _request(f"{BASE}/get?{urllib.parse.urlencode(params)}", timeout)
         payload = _payload(found) if isinstance(found, dict) else None
-        if payload is None:  # `get` exige coincidencia exacta; la búsqueda es más tolerante
-            query = {"artist_name": artist, "track_name": title}
-            best = _best_match(
-                _request(f"{BASE}/search?{urllib.parse.urlencode(query)}", timeout), duration)
-            payload = _payload(best) if best else None
+        if payload is None or not payload["synced"]:
+            # `get` exige coincidencia exacta y a veces esa versión solo tiene el texto
+            payload = _search(artist, title, duration, timeout, payload)
     except Exception as exc:  # noqa: BLE001 - sin red la canción suena igual
         log.warning("no se pudo consultar la letra de %s: %s", video_id, exc)
-        return None
+        return kept  # la que ya había (sin tiempos) sigue valiendo
 
     if payload is None:
         payload = {"synced": [], "plain": "", "source": "lrclib", "at": time.time(),
-                   "negative": True}
+                   "negative": True, "v": FORMAT}
     store(video_id, payload)
     return payload
