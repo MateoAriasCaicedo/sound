@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 1.4.2 — 2026-11-21
 
 ### Vista en grande
 - **La pestaña «Letra» ya no queda vacía** cuando una canción no tiene letra: lo dice claro
