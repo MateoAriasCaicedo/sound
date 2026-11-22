@@ -8,7 +8,7 @@ organiza por género y la reproduce en una ventana propia con cola automática y
 
 ## Instalación para usuarios (Windows 10/11)
 
-1. Descarga `Sound-1.4.0-setup.exe` desde la página de *Releases* del repositorio.
+1. Descarga `Sound-1.4.1-setup.exe` desde la página de *Releases* del repositorio.
 2. Ejecútalo. Se instala **solo para tu usuario** (no pide administrador) en
    `%LOCALAPPDATA%\Programs\Sound`, con acceso directo en el menú Inicio.
 3. Abre Sound y pulsa **Descargas → Diagnóstico** si algo no funciona.
@@ -27,7 +27,7 @@ de música.
 
 ### Modo portable
 
-Descarga el ZIP `Sound-1.4.0-windows.zip` del release, descomprímelo y crea un archivo vacío llamado
+Descarga el ZIP `Sound-1.4.1-windows.zip` del release, descomprímelo y crea un archivo vacío llamado
 `portable.txt` junto a `Sound.exe`. Los datos se guardarán en `data\` dentro de esa carpeta.
 
 ## Primeros pasos y problemas con YouTube
@@ -205,7 +205,7 @@ Quedan disponibles `sound` (CLI) y `sound-ui` (ventana). También funcionan
 
 ```powershell
 .\packaging\build.ps1              # genera dist\Sound\Sound.exe
-.\packaging\build.ps1 -Installer   # además genera dist\Sound-1.4.0-setup.exe
+.\packaging\build.ps1 -Installer   # además genera dist\Sound-1.4.1-setup.exe
 ```
 
 Requiere [Inno Setup 6](https://jrsoftware.org/isinfo.php) para el instalador. El script descarga

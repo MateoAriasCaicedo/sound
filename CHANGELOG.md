@@ -1,6 +1,6 @@
 # Cambios
 
-## Sin publicar
+## 1.4.1 — 2026-11-21
 
 ### Vista en grande
 - **La radio también se ve en grande**: el logo de la emisora sobre su color, su nombre, la

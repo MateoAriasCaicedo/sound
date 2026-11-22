@@ -1,8 +1,8 @@
 ; Instalador de Sound para Windows. Se compila con Inno Setup 6:
-;   iscc /DMyAppVersion=1.4.0 installer.iss
+;   iscc /DMyAppVersion=1.4.1 installer.iss
 #define MyAppName "Sound"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.4.0"
+  #define MyAppVersion "1.4.1"
 #endif
 #define MyAppPublisher "Mateo Arias"
 #define MyAppURL "https://github.com/MateoAriasCaicedo/sound"
